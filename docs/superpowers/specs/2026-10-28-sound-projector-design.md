@@ -163,8 +163,8 @@ editor preview ─────────────► × You hear ─► hea
 
 A decoded 4-minute song takes about 90 MB, so songs are not held fully in memory. This approach is Claude's call; the exact mechanism is left to the builder.
 
-- **Short pads:** pads under roughly 10 seconds are decoded into memory at startup.
-- **Long pads:** full songs and long sections are streamed from disk during playback. Their first moment is pre-decoded so they still start instantly.
+- **Every pad streams:** every pad, short or long, is streamed from disk during playback.
+- **Instant start:** the first 250 ms of each pad is pre-decoded and kept in memory, so playback still starts instantly. This replaced an earlier "short pads fully in memory" idea; it gives one code path and uses less memory.
 - **Audio callback:** the real-time audio callback must never block or allocate. Streaming happens on another thread.
 - **Editor:** the full waveform is computed only while a source is open in the editor.
 
