@@ -38,6 +38,7 @@ pub struct Editor {
     peaks: Option<Result<Vec<(f32, f32)>, String>>,
     rx: Receiver<Result<Vec<(f32, f32)>, String>>,
     selected: Option<PadId>,
+    previewing: Option<PadId>, // for the playhead, which follows it even if the selection moves
     drag: Option<Drag>,
     dirty: bool,
 }
@@ -48,7 +49,7 @@ impl Editor {
         std::thread::spawn(move || {
             let _ = tx.send(crate::decode::compute_peaks(&path, 256));
         });
-        Editor { source: src.id, peaks: None, rx, selected: None, drag: None, dirty: false }
+        Editor { source: src.id, peaks: None, rx, selected: None, previewing: None, drag: None, dirty: false }
     }
 
     pub fn select(&mut self, pad: PadId) {
@@ -144,7 +145,7 @@ impl Editor {
             let reg = Rect::from_x_y_ranges(x_of(anchor.min(current))..=x_of(anchor.max(current)), rect.y_range());
             p.rect(reg, 0.0, ACCENT_LIGHT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT_LIGHT), StrokeKind::Inside);
         }
-        if let (Some(secs), Some(pad)) = (view.preview_secs, self.selected.and_then(|id| pads.iter().find(|(_, x)| x.id == id))) {
+        if let (Some(secs), Some(pad)) = (view.preview_secs, self.previewing.and_then(|id| pads.iter().find(|(_, x)| x.id == id))) {
             let f = pad.1.start + secs_to_frames(secs as f64, src.rate);
             p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(1.5, Color32::WHITE));
         }
@@ -298,6 +299,7 @@ impl Editor {
                 }
             } else if ui.button("▶ Preview").on_hover_text("Plays to you only").clicked() {
                 action = Some(EditorAction::Preview(pad.id));
+                self.previewing = Some(pad.id);
             }
             let del = ui.add_enabled(!only_pad, egui::Button::new("Delete section"));
             let del = if only_pad { del.on_disabled_hover_text("Delete the whole sound from the grid instead") } else { del };

@@ -54,7 +54,7 @@ pub struct App {
     settings_open: bool,
     devices: (Vec<String>, Vec<String>),
     show_request: Arc<AtomicBool>,
-    _tray: Option<tray_icon::TrayIcon>,
+    tray: Option<tray_icon::TrayIcon>,
     start_hidden: bool,
 }
 
@@ -183,24 +183,29 @@ impl App {
             settings_open: false,
             devices: (Vec::new(), Vec::new()),
             show_request,
-            _tray: tray,
+            tray,
             start_hidden: std::env::args().any(|a| a == "--tray"),
         };
+        if app.s.start_with_windows {
+            let _ = crate::tray::set_autostart(true); // the exe may have moved since it was turned on
+        }
         app.sync();
         app
     }
 
-    /// Push the library to the engine and hotkeys, and save it.
-    fn sync(&mut self) {
+    /// Push the library to the engine and hotkeys, and save it. Returns whether the save worked.
+    fn sync(&mut self) -> bool {
         let _ = self.tx.send(Cmd::SetPads(pad_plays(&self.s)));
         self.hotkeys.set_bindings(bindings(&self.s));
-        self.save();
+        self.save()
     }
 
-    fn save(&mut self) {
-        if let Err(e) = self.s.save(&settings_path()) {
+    fn save(&mut self) -> bool {
+        let r = self.s.save(&settings_path());
+        if let Err(e) = &r {
             self.set_notice(format!("Couldn't save your settings: {e}"));
         }
+        r.is_ok()
     }
 
     fn set_notice(&mut self, msg: String) {
@@ -285,6 +290,11 @@ impl App {
 
     fn poll_capture(&mut self, ctx: &egui::Context) {
         let Some((target, baseline)) = self.capture else { return };
+        // Keys pressed in another app (the game) must not become a hotkey, and bindings stay off while choosing.
+        if !ctx.input(|i| i.focused) {
+            self.end_capture();
+            return;
+        }
         ctx.request_repaint_after(Duration::from_millis(16));
         match poll_capture(&baseline) {
             Some(Captured::Key(h)) => {
@@ -311,12 +321,15 @@ impl App {
     fn delete_pad(&mut self, id: PadId) {
         let Some(i) = self.s.pads.iter().position(|p| p.id == id) else { return };
         let pad = self.s.pads.remove(i);
+        let mut orphan = None;
         if !self.s.pads.iter().any(|p| p.source == pad.source)
             && let Some(j) = self.s.sources.iter().position(|s| s.id == pad.source) {
-                let src = self.s.sources.remove(j);
-                let _ = std::fs::remove_file(sounds_dir().join(&src.file));
+                orphan = Some(self.s.sources.remove(j).file);
             }
-        self.sync();
+        // Delete the file only once the saved settings no longer point at it.
+        if self.sync() && let Some(file) = orphan {
+            let _ = std::fs::remove_file(sounds_dir().join(file));
+        }
     }
 
     fn pad_name(&self, id: PadId) -> String {
@@ -335,7 +348,9 @@ impl App {
         let failed = self.hotkeys.failed();
         match settings_panel::show(ctx, &mut self.settings_open, &mut self.s, view, &self.devices, &failed) {
             settings_panel::SettingsAction::None => {}
-            settings_panel::SettingsAction::Changed => self.sync(),
+            settings_panel::SettingsAction::Changed => {
+                self.sync();
+            }
             settings_panel::SettingsAction::DevicesChanged => {
                 self.save();
                 let s = &self.s;
@@ -538,7 +553,9 @@ impl App {
                 self.editor = None;
                 self.sync();
             }
-            Some(editor::EditorAction::Changed) => self.sync(),
+            Some(editor::EditorAction::Changed) => {
+                self.sync();
+            }
             Some(editor::EditorAction::Preview(id)) => {
                 self.sync();
                 if let Some(pp) = pad_plays(&self.s).into_iter().find(|p| p.id == id) {
@@ -742,7 +759,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        if ctx.input(|i| i.viewport().close_requested()) {
+        // Without a tray icon there'd be no way back (or to quit), so closing quits.
+        if self.tray.is_some() && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
