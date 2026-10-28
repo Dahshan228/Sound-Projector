@@ -56,6 +56,7 @@ pub struct App {
     show_request: Arc<AtomicBool>,
     tray: Option<tray_icon::TrayIcon>,
     start_hidden: bool,
+    first_run: bool, // no settings file yet: open Settings with the setup guide showing
 }
 
 pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
@@ -185,9 +186,13 @@ impl App {
             show_request,
             tray,
             start_hidden: std::env::args().any(|a| a == "--tray"),
+            first_run: !settings_path().exists(),
         };
         if app.s.start_with_windows {
             let _ = crate::tray::set_autostart(true); // the exe may have moved since it was turned on
+        }
+        if app.first_run {
+            app.open_settings();
         }
         app.sync();
         app
@@ -346,7 +351,7 @@ impl App {
             return;
         }
         let failed = self.hotkeys.failed();
-        match settings_panel::show(ctx, &mut self.settings_open, &mut self.s, view, &self.devices, &failed) {
+        match settings_panel::show(ctx, &mut self.settings_open, &mut self.s, view, &self.devices, &failed, self.first_run) {
             settings_panel::SettingsAction::None => {}
             settings_panel::SettingsAction::Changed => {
                 self.sync();

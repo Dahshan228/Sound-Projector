@@ -164,7 +164,7 @@ fn fatal(e: &cpal::Error) -> bool {
     !matches!(e.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied)
 }
 
-const CABLE: &str = "CABLE Input";
+pub const CABLE: &str = "CABLE Input";
 const RETRY: Duration = Duration::from_secs(2);
 
 struct Out {

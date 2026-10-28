@@ -17,6 +17,11 @@ mod voice;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // The installer asks this before installing VB-Cable: exit code 0 means it's already there.
+    if std::env::args().any(|a| a == "--has-vbcable") {
+        let (_, outs) = engine::list_devices();
+        std::process::exit(if outs.iter().any(|n| n.contains(engine::CABLE)) { 0 } else { 1 });
+    }
     if tray::already_running() {
         if let Some(h) = tray::find_window() {
             tray::show_window(h);

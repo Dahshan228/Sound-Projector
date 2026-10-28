@@ -13,7 +13,7 @@ pub enum SettingsAction {
 }
 
 const SETUP_STEPS: [&str; 6] = [
-    "Install VB-Cable, then reboot.",
+    "Install VB-Cable, then restart Windows. The Sound Projector installer does this for you.",
     "In Discord, go to Voice & Video and set Input Device to CABLE Output.",
     "For the cleanest sound, turn off Discord's Noise Suppression (Krisp), Echo Cancellation, and Automatic Gain Control. If they stay on, Discord's processing squashes music no matter how clean the app's output is.",
     "Use Voice Activity mode. With Push to Talk, friends only hear songs while the key is held.",
@@ -28,16 +28,33 @@ pub fn show(
     view: &View,
     devices: &(Vec<String>, Vec<String>),
     failed: &[HotkeyAction],
+    first_run: bool,
 ) -> SettingsAction {
     let mut action = SettingsAction::None;
     egui::Window::new("Settings")
         .open(open)
         .collapsible(false)
         .resizable(false)
+        .vscroll(true)
         .default_width(440.0)
         .pivot(egui::Align2::CENTER_TOP)
         .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 40.0))
         .show(ctx, |ui| {
+        // First, so a new user sees it straight away; once VB-Cable works it's one collapsed line.
+        egui::CollapsingHeader::new("Setup guide").default_open(first_run || view.friends.is_err()).show(ui, |ui| {
+            for (i, step) in SETUP_STEPS.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("{}.", i + 1)).color(MUTED));
+                    ui.label(*step);
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("VB-CABLE is free donationware by VB-Audio. If it's useful to you, you can donate at").color(MUTED));
+                ui.hyperlink_to("vb-cable.com", "https://vb-audio.com/Cable/");
+            });
+        });
+        ui.add_space(8.0);
+
         ui.label(egui::RichText::new("Devices").font(semibold(14.0)));
         egui::Grid::new("devices").num_columns(2).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
             for (label, value, names, none_label, status) in [
@@ -96,16 +113,6 @@ pub fn show(
             action = SettingsAction::AutostartChanged;
         }
 
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Setup guide").default_open(view.friends.is_err()).show(ui, |ui| {
-            for (i, step) in SETUP_STEPS.iter().enumerate() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(format!("{}.", i + 1)).color(MUTED));
-                    ui.label(*step);
-                });
-            }
-            ui.hyperlink_to("Get VB-Cable (vb-audio.com)", "https://vb-audio.com/Cable/");
-        });
     });
     action
 }

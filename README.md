@@ -2,9 +2,18 @@
 
 A lightweight Windows soundboard for Discord calls and in-game voice chat. Load your songs and sounds, trim them, boost them, and mark sections of a song without touching the original file. Queue them up with global hotkeys while you play. Your friends hear them through your mic, mixed with your voice, and you hear them in your headphones, each with its own volume slider.
 
+## Download
+
+1. Download **SoundProjectorSetup.exe** from the [latest release](https://github.com/Dahshan228/Sound-Projector/releases/latest) and run it.
+2. If Windows says "Windows protected your PC", click **More info**, then **Run anyway**. The installer isn't code-signed, so Windows doesn't recognise it yet.
+3. Click **Install**. If you don't have VB-Cable, Setup installs it too. Click **Yes** when Windows asks to allow it, click **Install** if Windows asks about the driver, then restart when Setup asks.
+4. Sound Projector opens with the setup guide below. The Discord steps are the only part left to do by hand.
+
+VB-CABLE is a free virtual audio cable by [VB-Audio Software](https://vb-audio.com/Cable/), bundled under their donationware terms. If you find it useful, consider donating to them.
+
 ## Setup guide
 
-1. Install VB-Cable, then reboot.
+1. Install VB-Cable, then reboot. The installer above does this for you.
 2. In Discord, go to **Voice & Video** and set **Input Device** to **CABLE Output**.
 3. For the cleanest sound, turn off Discord's **Noise Suppression** (Krisp), **Echo Cancellation**, and **Automatic Gain Control**. If they stay on, Discord's processing squashes music no matter how clean the app's output is.
 4. Use **Voice Activity** mode. With **Push to Talk**, friends only hear songs while the key is held.
@@ -46,5 +55,10 @@ Your library lives in `%APPDATA%\SoundProjector\sounds\` (imported files are cop
    cargo build --release
    ```
    The app is `target\release\sound-projector.exe`.
+4. To build the installer, install Inno Setup (`winget install JRSoftware.InnoSetup`), then run:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File installer\build.ps1
+   ```
+   It downloads VB-CABLE into `target\vbcable` the first time, and writes `target\installer\SoundProjectorSetup.exe`. Upload that file to a new GitHub release.
 
 Run the tests with `cargo test`. Two hardware tests are opt-in: `cargo test -- --ignored`. One plays a silent tone through your default output; the other adds and then removes the Start with Windows registry entry.
