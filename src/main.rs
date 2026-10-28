@@ -1,5 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod decode;
+mod library;
+mod settings;
+#[cfg(test)]
+mod testutil;
+
 use eframe::egui;
 
 struct App;
