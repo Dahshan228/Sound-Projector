@@ -59,6 +59,7 @@ impl Queue {
         &self.up_next
     }
 
+    #[cfg(test)]
     pub fn position_of(&self, pad: PadId) -> Option<usize> {
         self.up_next.iter().position(|e| e.pad == pad)
     }

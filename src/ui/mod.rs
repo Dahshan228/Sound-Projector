@@ -1,4 +1,5 @@
 pub mod editor;
+pub mod settings_panel;
 
 use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
@@ -7,6 +8,7 @@ use crate::settings::{Hotkey, PadId, Settings, Source, settings_path, sounds_dir
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Rect, Sense, Stroke, StrokeKind, vec2};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -49,6 +51,11 @@ pub struct App {
     confirm_delete: Option<PadId>,
     seek_drag: Option<f32>,
     editor: Option<editor::Editor>,
+    settings_open: bool,
+    devices: (Vec<String>, Vec<String>),
+    show_request: Arc<AtomicBool>,
+    _tray: Option<tray_icon::TrayIcon>,
+    start_hidden: bool,
 }
 
 pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
@@ -157,6 +164,8 @@ impl App {
             hctx.request_repaint();
         });
         let (import_tx, import_rx) = channel();
+        let show_request = Arc::new(AtomicBool::new(false));
+        let tray = crate::tray::create_tray(cc.egui_ctx.clone(), show_request.clone());
         let mut app = App {
             s,
             engine,
@@ -171,6 +180,11 @@ impl App {
             confirm_delete: None,
             seek_drag: None,
             editor: None,
+            settings_open: false,
+            devices: (Vec::new(), Vec::new()),
+            show_request,
+            _tray: tray,
+            start_hidden: std::env::args().any(|a| a == "--tray"),
         };
         app.sync();
         app
@@ -309,11 +323,45 @@ impl App {
         self.s.pads.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_else(|| "(deleted)".into())
     }
 
+    fn open_settings(&mut self) {
+        self.devices = crate::engine::list_devices();
+        self.settings_open = true;
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context, view: &View) {
+        if !self.settings_open {
+            return;
+        }
+        let failed = self.hotkeys.failed();
+        match settings_panel::show(ctx, &mut self.settings_open, &mut self.s, view, &self.devices, &failed) {
+            settings_panel::SettingsAction::None => {}
+            settings_panel::SettingsAction::Changed => self.sync(),
+            settings_panel::SettingsAction::DevicesChanged => {
+                self.save();
+                let s = &self.s;
+                let choice = DeviceChoice { mic: s.mic_device.clone(), friends: s.friends_device.clone(), you: s.you_device.clone() };
+                let _ = self.tx.send(Cmd::SetDevices(choice));
+            }
+            settings_panel::SettingsAction::Capture(t) => self.start_capture(t),
+            settings_panel::SettingsAction::AutostartChanged => {
+                if let Err(e) = crate::tray::set_autostart(self.s.start_with_windows) {
+                    self.s.start_with_windows = !self.s.start_with_windows;
+                    self.set_notice(format!("Couldn't change Start with Windows: {e}"));
+                }
+                self.save();
+            }
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top").frame(egui::Frame::new().fill(BAR).inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Sound Projector").font(semibold(16.0)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙").on_hover_text("Settings").clicked() {
+                        self.open_settings();
+                    }
+                    ui.add_space(8.0);
                     let you = self.volume_slider(ui, "You hear", GREEN, false);
                     ui.add_space(12.0);
                     let friends = self.volume_slider(ui, "Friends hear", ACCENT_LIGHT, true);
@@ -363,7 +411,12 @@ impl App {
         }
         egui::Panel::top("banners").frame(egui::Frame::new().fill(WARN_BG).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
             for l in &lines {
-                ui.label(egui::RichText::new(l).color(WARN));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(l).color(WARN));
+                    if ui.small_button("Setup guide").clicked() {
+                        self.open_settings();
+                    }
+                });
             }
             if let Some((n, _)) = self.notice.clone() {
                 ui.horizontal(|ui| {
@@ -683,6 +736,21 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs even while the window is hidden in the tray, so the tray's "Show" lands here.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.show_request.swap(false, Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        if std::mem::take(&mut self.start_hidden) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_imports();
@@ -701,6 +769,7 @@ impl eframe::App for App {
         } else {
             self.grid(ui, &view);
         }
+        self.settings_window(&ctx, &view);
         self.dialogs(&ctx);
         if view.current.is_some() || view.preview_secs.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));

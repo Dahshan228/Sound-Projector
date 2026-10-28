@@ -53,6 +53,7 @@ impl Limiter {
         }
     }
 
+    #[cfg(test)]
     pub fn latency_frames(&self) -> usize {
         self.lookahead
     }
