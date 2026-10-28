@@ -16,24 +16,6 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// 32×32 accent-purple circle with a white play triangle, drawn in code so there's no asset file.
-pub fn icon_rgba() -> (Vec<u8>, u32, u32) {
-    let n = 32u32;
-    let mut px = Vec::with_capacity((n * n * 4) as usize);
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let d = ((fx - 16.0).powi(2) + (fy - 16.0).powi(2)).sqrt();
-            let alpha = (15.5 - d).clamp(0.0, 1.0); // soft edge
-            // Play triangle: (12,9) (12,23) (24,16)
-            let inside = fx >= 12.0 && (fy - 16.0).abs() <= (24.0 - fx) * 7.0 / 12.0;
-            let (r, g, b) = if inside { (255, 255, 255) } else { (0x64, 0x50, 0xf0) };
-            px.extend_from_slice(&[r, g, b, (alpha * 255.0) as u8]);
-        }
-    }
-    (px, n, n)
-}
-
 pub fn find_window() -> Option<isize> {
     let title = wide(WINDOW_TITLE);
     let h = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
@@ -104,9 +86,8 @@ pub fn create_tray(ctx: egui::Context, show: Arc<AtomicBool>) -> Option<TrayIcon
         }
     }));
 
-    let (rgba, w, h) = icon_rgba();
     TrayIconBuilder::new()
-        .with_icon(Icon::from_rgba(rgba, w, h).ok()?)
+        .with_icon(Icon::from_rgba(crate::icon::icon_rgba(32), 32, 32).ok()?)
         .with_tooltip(WINDOW_TITLE)
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -117,15 +98,6 @@ pub fn create_tray(ctx: egui::Context, show: Arc<AtomicBool>) -> Option<TrayIcon
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn icon_is_32_square_and_round() {
-        let (px, w, h) = icon_rgba();
-        assert_eq!((px.len(), w, h), (32 * 32 * 4, 32, 32));
-        assert_eq!(px[3], 0); // corner is transparent
-        let centre = ((16 * 32 + 16) * 4) as usize;
-        assert_eq!(&px[centre..centre + 4], &[255, 255, 255, 255]); // play triangle
-    }
 
     #[test]
     #[ignore] // writes the real HKCU Run key: cargo test autostart -- --ignored

@@ -4,6 +4,7 @@ mod decode;
 mod dsp;
 mod engine;
 mod hotkeys;
+mod icon;
 mod library;
 mod queue;
 mod settings;
@@ -42,8 +43,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([560.0, 380.0])
             .with_drag_and_drop(true)
             .with_icon({
-                let (rgba, width, height) = tray::icon_rgba();
-                egui::IconData { rgba, width, height }
+                egui::IconData { rgba: icon::icon_rgba(64), width: 64, height: 64 }
             }),
         ..Default::default()
     };
