@@ -2,6 +2,7 @@
 
 mod decode;
 mod library;
+mod queue;
 mod settings;
 #[cfg(test)]
 mod testutil;
