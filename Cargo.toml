@@ -1,0 +1,29 @@
+[package]
+name = "sound-projector"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence", "accesskit"] }
+rfd = "0.17.2"
+rtrb = "0.4.1"
+rubato = "5.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+symphonia = { version = "0.6.1", features = ["mp3"] }
+tray-icon = "0.26.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_Registry"] }
+
+[dev-dependencies]
+hound = "3.5.1"
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3          # DSP/decoders too slow to play glitch-free unoptimized
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
