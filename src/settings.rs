@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub type PadId = u32;
@@ -70,30 +71,46 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Missing file → defaults. Unreadable file → set aside as `settings.json.bad-<unix>`, never overwritten.
-    pub fn load(path: &Path) -> (Settings, Option<String>) {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return (Settings::default(), None);
+    /// Missing file → defaults. Damaged file → its bytes are kept as `settings.json.bad-<unix>`.
+    /// Err when the file is there but can't be read (e.g. locked), so the caller never saves over it.
+    pub fn load(path: &Path) -> Result<(Settings, Option<String>), String> {
+        let mut read = std::fs::read(path);
+        for _ in 0..5 {
+            // an antivirus scan can hold the file for a moment
+            match &read {
+                Err(e) if e.kind() != ErrorKind::NotFound => {}
+                _ => break,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            read = std::fs::read(path);
+        }
+        let bytes = match read {
+            Ok(b) => b,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((Settings::default(), None)),
+            Err(e) => return Err(e.to_string()),
         };
-        match serde_json::from_str(&text) {
-            Ok(s) => (s, None),
+        match serde_json::from_slice(&bytes) {
+            Ok(s) => Ok((s, None)),
             Err(_) => {
                 let secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let name = format!("{}.bad-{secs}", path.file_name().unwrap_or_default().to_string_lossy());
-                let _ = std::fs::rename(path, path.with_file_name(&name));
+                std::fs::write(path.with_file_name(&name), &bytes).map_err(|e| e.to_string())?;
                 let notice = format!("Your settings file was damaged, so it was set aside as {name} and a fresh one was started.");
-                (Settings::default(), Some(notice))
+                Ok((Settings::default(), Some(notice)))
             }
         }
     }
 
-    /// Atomic: write `<path>.tmp`, then rename over `path`.
+    /// Atomic and durable: write and flush `<path>.tmp`, then rename over `path`.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_file_name(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
         std::fs::rename(&tmp, path)
     }
 
@@ -129,7 +146,7 @@ mod tests {
     #[test]
     fn missing_file_gives_defaults() {
         let d = temp_dir("missing");
-        let (s, notice) = Settings::load(&d.join("settings.json"));
+        let (s, notice) = Settings::load(&d.join("settings.json")).unwrap();
         assert!(s.pads.is_empty() && notice.is_none());
         assert_eq!((s.friends_volume, s.you_volume), (0.8, 0.5));
     }
@@ -141,7 +158,7 @@ mod tests {
         let mut s = Settings::default();
         s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }) });
         s.save(&p).unwrap();
-        assert_eq!(Settings::load(&p).0, s);
+        assert_eq!(Settings::load(&p).unwrap().0, s);
         assert!(!d.join("settings.json.tmp").exists());
     }
 
@@ -150,7 +167,7 @@ mod tests {
         let d = temp_dir("corrupt");
         let p = d.join("settings.json");
         std::fs::write(&p, "{ not json").unwrap();
-        let (s, notice) = Settings::load(&p);
+        let (s, notice) = Settings::load(&p).unwrap();
         assert!(s.pads.is_empty() && notice.is_some());
         let bad: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
@@ -162,11 +179,23 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_file_is_kept_aside_too() {
+        let d = temp_dir("ansi");
+        let p = d.join("settings.json");
+        let bytes = b"{\"pads\":[{\"name\":\"Caf\xe9\"}]}";
+        std::fs::write(&p, bytes).unwrap();
+        let (_, notice) = Settings::load(&p).unwrap();
+        assert!(notice.is_some());
+        let bad = std::fs::read_dir(&d).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("settings.json.bad")).unwrap();
+        assert_eq!(std::fs::read(bad.path()).unwrap(), bytes);
+    }
+
+    #[test]
     fn unknown_and_missing_fields_are_tolerated() {
         let d = temp_dir("fields");
         let p = d.join("settings.json");
         std::fs::write(&p, r#"{"friends_volume":0.3,"future_field":1}"#).unwrap();
-        let (s, notice) = Settings::load(&p);
+        let (s, notice) = Settings::load(&p).unwrap();
         assert_eq!((s.friends_volume, s.you_volume, notice), (0.3, 0.5, None));
     }
 }

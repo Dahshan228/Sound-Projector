@@ -22,7 +22,18 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let (settings, notice) = settings::Settings::load(&settings::settings_path());
+    let (settings, notice) = match settings::Settings::load(&settings::settings_path()) {
+        Ok(x) => x,
+        Err(e) => {
+            // Starting with defaults would save over the user's library.
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Sound Projector")
+                .set_description(format!("Couldn't read your settings file: {e}\n\nClose anything that might have it open, then start Sound Projector again."))
+                .show();
+            return Ok(());
+        }
+    };
     let options = eframe::NativeOptions {
         persist_window: true,
         viewport: egui::ViewportBuilder::default()
