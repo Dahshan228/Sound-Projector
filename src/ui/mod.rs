@@ -1,3 +1,5 @@
+pub mod editor;
+
 use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
 use crate::library::{fmt_time, frames_to_secs, import, is_clip, whole_pad};
@@ -46,6 +48,7 @@ pub struct App {
     rename: Option<(PadId, String)>,
     confirm_delete: Option<PadId>,
     seek_drag: Option<f32>,
+    editor: Option<editor::Editor>,
 }
 
 pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
@@ -167,6 +170,7 @@ impl App {
             rename: None,
             confirm_delete: None,
             seek_drag: None,
+            editor: None,
         };
         app.sync();
         app
@@ -469,6 +473,34 @@ impl App {
             });
     }
 
+    fn edit(&mut self, ui: &mut egui::Ui, view: &View) {
+        let failed = self.hotkeys.failed();
+        let action = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(14)))
+            .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.editor.as_mut().map(|e| e.show(ui, &mut self.s, view, &failed))).inner)
+            .inner;
+        match action {
+            Some(editor::EditorAction::Done) => {
+                let _ = self.tx.send(Cmd::StopPreview);
+                self.editor = None;
+                self.sync();
+            }
+            Some(editor::EditorAction::Changed) => self.sync(),
+            Some(editor::EditorAction::Preview(id)) => {
+                self.sync();
+                if let Some(pp) = pad_plays(&self.s).into_iter().find(|p| p.id == id) {
+                    let _ = self.tx.send(Cmd::Preview(pp));
+                }
+            }
+            Some(editor::EditorAction::StopPreview) => {
+                let _ = self.tx.send(Cmd::StopPreview);
+            }
+            Some(editor::EditorAction::Capture(id)) => self.start_capture(CaptureTarget::Pad(id)),
+            Some(editor::EditorAction::Delete(id)) => self.confirm_delete = Some(id),
+            Some(editor::EditorAction::None) | None => {}
+        }
+    }
+
     fn grid(&mut self, ui: &mut egui::Ui, view: &View) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(12))).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -498,7 +530,7 @@ impl App {
 
     fn pad_tile(&mut self, ui: &mut egui::Ui, id: PadId, w: f32, view: &View, failed: &[HotkeyAction]) {
         let Some(pad) = self.s.pads.iter().find(|p| p.id == id).cloned() else { return };
-        let src = self.s.sources.iter().find(|s| s.id == pad.source);
+        let src = self.s.sources.iter().find(|s| s.id == pad.source).cloned();
         let (rect, r) = ui.allocate_exact_size(vec2(w, 64.0), Sense::click());
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &pad.name));
         let playing = view.current.map(|c| c.1) == Some(id);
@@ -516,8 +548,8 @@ impl App {
         job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width());
         p.galley(inner.left_top(), p.layout_job(job), TEXT);
 
-        let secs = src.map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
-        let mut meta = if src.is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
+        let secs = src.as_ref().map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
+        let mut meta = if src.as_ref().is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
         if let Some(q) = view.up_next.iter().position(|(_, p)| *p == id) {
             meta.push_str(&format!(" · #{} in queue", q + 1));
         }
@@ -542,6 +574,14 @@ impl App {
             let _ = self.tx.send(Cmd::Enqueue(id));
         }
         r.context_menu(|ui| {
+            if let Some(src) = src.clone()
+                && ui.button("Edit").clicked()
+            {
+                let mut ed = editor::Editor::open(&src, sounds_dir().join(&src.file));
+                ed.select(id);
+                self.editor = Some(ed);
+                ui.close();
+            }
             if ui.button("Rename").clicked() {
                 self.rename = Some((id, pad.name.clone()));
                 ui.close();
@@ -656,7 +696,11 @@ impl eframe::App for App {
         self.banners(ui, &view);
         self.now_playing(ui, &view);
         self.queue_panel(ui, &view);
-        self.grid(ui, &view);
+        if self.editor.is_some() {
+            self.edit(ui, &view);
+        } else {
+            self.grid(ui, &view);
+        }
         self.dialogs(&ctx);
         if view.current.is_some() || view.preview_secs.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
