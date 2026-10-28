@@ -3,6 +3,7 @@
 mod decode;
 mod dsp;
 mod engine;
+mod hotkeys;
 mod library;
 mod queue;
 mod settings;
