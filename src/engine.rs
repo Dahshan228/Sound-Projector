@@ -31,6 +31,14 @@ impl PadPlay {
     }
 }
 
+/// Slider positions (0..=1) and the global boost in dB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Volumes {
+    pub friends: f32,
+    pub you: f32,
+    pub boost_db: f32,
+}
+
 /// `None` = Windows default (mic, you) or auto-detect VB-Cable (friends).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeviceChoice {
@@ -49,7 +57,7 @@ pub enum Cmd {
     Move(u64, usize),
     Preview(PadPlay),
     StopPreview,
-    SetVolumes { friends: f32, you: f32 },
+    SetVolumes(Volumes),
     SetPads(Vec<PadPlay>),
     SetDevices(DeviceChoice),
 }
@@ -91,7 +99,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn start(choice: DeviceChoice, volumes: (f32, f32), pads: Vec<PadPlay>, on_change: Box<dyn Fn() + Send>) -> Engine {
+    pub fn start(choice: DeviceChoice, volumes: Volumes, pads: Vec<PadPlay>, on_change: Box<dyn Fn() + Send>) -> Engine {
         let (tx, rx) = channel();
         let view = Arc::new(Mutex::new(View::default()));
         let v = view.clone();
@@ -183,7 +191,7 @@ impl Out {
 
 struct Controller {
     choice: DeviceChoice,
-    volumes: (f32, f32),
+    volumes: Volumes,
     pads: HashMap<PadId, PadPlay>,
     queue: Queue,
     paused: bool,
@@ -202,7 +210,7 @@ struct Controller {
 }
 
 impl Controller {
-    fn new(choice: DeviceChoice, volumes: (f32, f32), pads: Vec<PadPlay>, view: Arc<Mutex<View>>, on_change: Box<dyn Fn() + Send>) -> Controller {
+    fn new(choice: DeviceChoice, volumes: Volumes, pads: Vec<PadPlay>, view: Arc<Mutex<View>>, on_change: Box<dyn Fn() + Send>) -> Controller {
         let (jobs, job_rx) = channel::<(PadPlay, u32)>();
         let (done_tx, done) = channel();
         std::thread::Builder::new()
@@ -330,8 +338,8 @@ impl Controller {
                     you.send(OutCmd::SetPreview(None));
                 }
             }
-            Cmd::SetVolumes { friends, you } => {
-                self.volumes = (friends, you);
+            Cmd::SetVolumes(v) => {
+                self.volumes = v;
                 self.apply_volumes();
             }
             Cmd::SetPads(list) => self.set_pads(list),
@@ -354,12 +362,14 @@ impl Controller {
         }
     }
 
+    /// The boost rides on the output gain, so it changes a playing song live (the mic is mixed in after it).
     fn apply_volumes(&self) {
+        let boost = db_to_gain(self.volumes.boost_db);
         if let Some(o) = &self.friends {
-            o.shared.set_gain(slider_to_gain(self.volumes.0));
+            o.shared.set_gain(slider_to_gain(self.volumes.friends) * boost);
         }
         if let Some(o) = &self.you {
-            o.shared.set_gain(slider_to_gain(self.volumes.1));
+            o.shared.set_gain(slider_to_gain(self.volumes.you) * boost);
         }
     }
 
@@ -720,7 +730,7 @@ mod tests {
         // "You hear" at 0 so the check is silent; it still runs through the real device callbacks.
         let e = Engine::start(
             DeviceChoice::default(),
-            (0.8, 0.0),
+            Volumes { friends: 0.8, you: 0.0, boost_db: 0.0 },
             vec![PadPlay { id: 1, path: p, rate: 48_000, start: 0, end: 48_000, boost_db: 0.0 }],
             Box::new(|| {}),
         );

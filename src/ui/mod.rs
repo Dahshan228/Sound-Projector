@@ -1,7 +1,7 @@
 pub mod editor;
 pub mod settings_panel;
 
-use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View};
+use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View, Volumes};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
 use crate::library::{fmt_time, frames_to_secs, import, is_clip, whole_pad};
 use crate::settings::{Hotkey, PadId, Settings, Source, settings_path, sounds_dir};
@@ -57,6 +57,10 @@ pub struct App {
     tray: Option<tray_icon::TrayIcon>,
     start_hidden: bool,
     first_run: bool, // no settings file yet: open Settings with the setup guide showing
+}
+
+fn volumes(s: &Settings) -> Volumes {
+    Volumes { friends: s.friends_volume, you: s.you_volume, boost_db: s.boost_db }
 }
 
 pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
@@ -152,7 +156,7 @@ impl App {
         setup_style(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let choice = DeviceChoice { mic: s.mic_device.clone(), friends: s.friends_device.clone(), you: s.you_device.clone() };
-        let engine = Engine::start(choice, (s.friends_volume, s.you_volume), pad_plays(&s), Box::new(move || ctx.request_repaint()));
+        let engine = Engine::start(choice, volumes(&s), pad_plays(&s), Box::new(move || ctx.request_repaint()));
         let tx = engine.sender();
         let (htx, hctx) = (tx.clone(), cc.egui_ctx.clone());
         let hotkeys = HotkeyService::start(move |a| {
@@ -376,7 +380,8 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top").frame(egui::Frame::new().fill(BAR).inner_margin(egui::Margin::symmetric(14, 10))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Sound Projector").font(semibold(16.0)));
+                // Narrow windows get shorter sliders, so all three fit.
+                ui.spacing_mut().slider_width = if ui.available_width() < 720.0 { 70.0 } else { 100.0 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙").on_hover_text("Settings").clicked() {
                         self.open_settings();
@@ -385,12 +390,39 @@ impl App {
                     let you = self.volume_slider(ui, "You hear", GREEN, false);
                     ui.add_space(12.0);
                     let friends = self.volume_slider(ui, "Friends hear", ACCENT_LIGHT, true);
-                    if you || friends {
-                        let _ = self.tx.send(Cmd::SetVolumes { friends: self.s.friends_volume, you: self.s.you_volume });
+                    ui.add_space(12.0);
+                    let boost = self.boost_slider(ui);
+                    if you || friends || boost {
+                        let _ = self.tx.send(Cmd::SetVolumes(volumes(&self.s)));
+                    }
+                    // The name only where it fits; the window's title bar shows it too.
+                    if ui.available_width() > 150.0 {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new("Sound Projector").font(semibold(16.0)));
+                        });
                     }
                 });
             });
         });
+    }
+
+    /// Every sound louder for both outputs, on top of each pad's boost. Returns true when it changed.
+    fn boost_slider(&mut self, ui: &mut egui::Ui) -> bool {
+        let r = ui
+            .scope(|ui| {
+                ui.spacing_mut().slider_width *= 0.7;
+                ui.visuals_mut().selection.bg_fill = Color32::from_rgb(0xf5, 0xa5, 0x24);
+                let r = ui
+                    .add(egui::Slider::new(&mut self.s.boost_db, 0.0..=12.0).step_by(0.5).show_value(false).trailing_fill(true))
+                    .on_hover_text("Makes every sound louder for you and your friends, on top of each pad's own boost. Your mic isn't boosted.");
+                ui.label(egui::RichText::new(format!("Boost +{:.1} dB", self.s.boost_db)).color(MUTED));
+                r
+            })
+            .inner;
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            self.save();
+        }
+        r.changed()
     }
 
     /// Returns true when the value changed; saves when the drag ends.

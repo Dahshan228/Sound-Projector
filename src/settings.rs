@@ -42,6 +42,7 @@ pub struct Settings {
     pub next_id: u32,
     pub friends_volume: f32,
     pub you_volume: f32,
+    pub boost_db: f32, // every sound, both outputs, on top of each pad's boost
     pub mic_device: Option<String>,
     pub friends_device: Option<String>,
     pub you_device: Option<String>,
@@ -59,6 +60,7 @@ impl Default for Settings {
             next_id: 1,
             friends_volume: 0.8,
             you_volume: 0.5,
+            boost_db: 0.0,
             mic_device: None,
             friends_device: None,
             you_device: None,
@@ -196,6 +198,6 @@ mod tests {
         let p = d.join("settings.json");
         std::fs::write(&p, r#"{"friends_volume":0.3,"future_field":1}"#).unwrap();
         let (s, notice) = Settings::load(&p).unwrap();
-        assert_eq!((s.friends_volume, s.you_volume, notice), (0.3, 0.5, None));
+        assert_eq!((s.friends_volume, s.you_volume, s.boost_db, notice), (0.3, 0.5, 0.0, None));
     }
 }
