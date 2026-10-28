@@ -290,7 +290,7 @@ pub fn compute_peaks(path: &Path, bucket: u64) -> Result<Vec<(f32, f32)>, String
     loop {
         buf.clear();
         let more = p.next_chunk(&mut buf);
-        for f in buf.chunks_exact(2) {
+        for f in buf.as_chunks::<2>().0 {
             let m = 0.5 * (f[0] + f[1]);
             lo = lo.min(m);
             hi = hi.max(m);

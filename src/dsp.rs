@@ -60,7 +60,7 @@ impl Limiter {
     pub fn process(&mut self, stereo: &mut [f32]) {
         let w = self.lookahead + 1;
         let cap = self.minq.len();
-        for frame in stereo.chunks_exact_mut(2) {
+        for frame in stereo.as_chunks_mut::<2>().0 {
             let (l, r) = (frame[0], frame[1]);
             let peak = l.abs().max(r.abs());
             let req = if peak > self.threshold { self.threshold / peak } else { 1.0 };

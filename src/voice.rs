@@ -57,8 +57,8 @@ impl Voice {
             self.pre_pos += n * 2;
             got = n;
         }
-        if got < want && self.preroll_left() == 0 {
-            if let Some(s) = &mut self.stream {
+        if got < want && self.preroll_left() == 0
+            && let Some(s) = &mut self.stream {
                 let n = (want - got).min(s.slots() / 2);
                 if let Ok(chunk) = s.read_chunk(n * 2) {
                     let (a, b) = chunk.as_slices();
@@ -68,9 +68,8 @@ impl Voice {
                     got += n;
                 }
             }
-        }
         dst[got * 2..].fill(0.0);
-        for f in dst[..got * 2].chunks_exact_mut(2) {
+        for f in dst[..got * 2].as_chunks_mut::<2>().0 {
             let mut g = self.gain;
             if self.fade_in > 0 {
                 g *= 1.0 - self.fade_in as f32 / FADE_FRAMES as f32;
@@ -232,12 +231,12 @@ impl OutputState {
         for dev in out.chunks_mut(BLOCK * ch) {
             let n = dev.len() / ch;
             self.mix_block(n);
-            for (f, s) in dev.chunks_exact_mut(ch).zip(self.mix.chunks_exact(2)) {
+            for (f, [l, r]) in dev.chunks_exact_mut(ch).zip(self.mix.as_chunks::<2>().0) {
                 if ch == 1 {
-                    f[0] = 0.5 * (s[0] + s[1]);
+                    f[0] = 0.5 * (l + r);
                 } else {
-                    f[0] = s[0];
-                    f[1] = s[1];
+                    f[0] = *l;
+                    f[1] = *r;
                     f[2..].fill(0.0);
                 }
             }
@@ -306,7 +305,7 @@ impl OutputState {
         }
 
         let target = f32::from_bits(self.shared.gain_target.load(Relaxed));
-        for f in mix.chunks_exact_mut(2) {
+        for f in mix.as_chunks_mut::<2>().0 {
             self.gain += (target - self.gain).clamp(-self.gain_step, self.gain_step);
             f[0] *= self.gain;
             f[1] *= self.gain;
@@ -316,7 +315,7 @@ impl OutputState {
         if let Some(mic) = self.mic.as_mut() {
             let buf = &mut self.mic_buf[..n];
             mic.resampler.process(&mut mic.ring, buf);
-            for (f, s) in mix.chunks_exact_mut(2).zip(buf.iter()) {
+            for (f, s) in mix.as_chunks_mut::<2>().0.iter_mut().zip(buf.iter()) {
                 f[0] += s;
                 f[1] += s;
             }

@@ -225,11 +225,10 @@ impl Controller {
                 while out.ctl.trash.pop().is_ok() {}
             }
             while let Ok((p, rate, r)) = self.done.try_recv() {
-                if let (Ok(v), Some(cur)) = (r, self.pads.get(&p.id)) {
-                    if cur.same_region(&p) {
+                if let (Ok(v), Some(cur)) = (r, self.pads.get(&p.id))
+                    && cur.same_region(&p) {
                         self.prerolls.insert((p.id, rate), v.into());
                     }
-                }
             }
             let finished = self.primary().and_then(|o| o.shared.take_finished());
             if let Some(o) = self.secondary() {
@@ -273,12 +272,11 @@ impl Controller {
             }
             Cmd::TogglePause => self.set_paused(!self.paused),
             Cmd::Seek(f) => {
-                if let Some(e) = self.queue.current() {
-                    if let Some(p) = self.pads.get(&e.pad) {
+                if let Some(e) = self.queue.current()
+                    && let Some(p) = self.pads.get(&e.pad) {
                         let at = p.start + ((p.end - p.start) as f64 * f.clamp(0.0, 1.0) as f64) as u64;
                         self.start_entry(e, Some(at));
                     }
-                }
             }
             Cmd::Remove(id) => {
                 self.queue.remove(id);
