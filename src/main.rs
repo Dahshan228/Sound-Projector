@@ -2,6 +2,7 @@
 
 mod decode;
 mod dsp;
+mod engine;
 mod library;
 mod queue;
 mod settings;
