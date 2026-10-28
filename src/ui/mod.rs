@@ -556,11 +556,16 @@ impl App {
             Some(editor::EditorAction::Changed) => {
                 self.sync();
             }
-            Some(editor::EditorAction::Preview(id)) => {
-                self.sync();
-                if let Some(pp) = pad_plays(&self.s).into_iter().find(|p| p.id == id) {
-                    let _ = self.tx.send(Cmd::Preview(pp));
+            Some(editor::EditorAction::Listen { from, to, boost_db }) => {
+                if let Some(src) = self.editor.as_ref().and_then(|e| self.s.sources.iter().find(|s| s.id == e.source)) {
+                    let p = PadPlay { id: 0, path: sounds_dir().join(&src.file), rate: src.rate, start: from, end: to, boost_db };
+                    let _ = self.tx.send(Cmd::Preview(p));
                 }
+            }
+            Some(editor::EditorAction::PlayForFriends(id)) => {
+                self.sync(); // a snippet marked a moment ago isn't saved yet
+                let _ = self.tx.send(Cmd::StopPreview);
+                let _ = self.tx.send(Cmd::Enqueue(id));
             }
             Some(editor::EditorAction::StopPreview) => {
                 let _ = self.tx.send(Cmd::StopPreview);
@@ -602,7 +607,11 @@ impl App {
         let Some(pad) = self.s.pads.iter().find(|p| p.id == id).cloned() else { return };
         let src = self.s.sources.iter().find(|s| s.id == pad.source).cloned();
         let (rect, r) = ui.allocate_exact_size(vec2(w, 64.0), Sense::click());
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &pad.name));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Open {}", pad.name)));
+        // Added after the tile, so it sits on top and takes its own clicks.
+        let play = Rect::from_center_size(rect.right_top() + vec2(-22.0, 22.0), vec2(26.0, 26.0));
+        let pr = ui.interact(play, Id::unique(("play", id)), Sense::click()).on_hover_text("Play for friends");
+        pr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Play {} for friends", pad.name)));
         let playing = view.current.map(|c| c.1) == Some(id);
         let stroke = if playing {
             Stroke::new(1.5, ACCENT_LIGHT)
@@ -615,8 +624,10 @@ impl App {
         p.rect(rect, 8.0, if playing { PLAYING } else { PAD }, stroke, StrokeKind::Inside);
         let inner = rect.shrink2(vec2(12.0, 10.0));
         let mut job = egui::text::LayoutJob::simple_singleline(pad.name.clone(), semibold(14.0), TEXT);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width());
+        job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width() - 26.0);
         p.galley(inner.left_top(), p.layout_job(job), TEXT);
+        p.circle_filled(play.center(), 12.0, if pr.hovered() { ACCENT_LIGHT } else { ACCENT });
+        p.text(play.center() + vec2(1.0, 0.0), Align2::CENTER_CENTER, "▶", FontId::proportional(11.0), Color32::WHITE);
 
         let secs = src.as_ref().map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
         let mut meta = if src.as_ref().is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
@@ -640,18 +651,16 @@ impl App {
         let g = p.layout_job(job);
         p.galley(inner.left_bottom() - vec2(0.0, g.size().y), g, MUTED);
 
-        if r.clicked() {
+        if pr.clicked() {
             let _ = self.tx.send(Cmd::Enqueue(id));
+        } else if r.clicked()
+            && let Some(src) = &src
+        {
+            let mut ed = editor::Editor::open(src, sounds_dir().join(&src.file));
+            ed.select(id);
+            self.editor = Some(ed);
         }
         r.context_menu(|ui| {
-            if let Some(src) = src.clone()
-                && ui.button("Edit").clicked()
-            {
-                let mut ed = editor::Editor::open(&src, sounds_dir().join(&src.file));
-                ed.select(id);
-                self.editor = Some(ed);
-                ui.close();
-            }
             if ui.button("Rename").clicked() {
                 self.rename = Some((id, pad.name.clone()));
                 ui.close();

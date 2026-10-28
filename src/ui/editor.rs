@@ -1,4 +1,4 @@
-use super::{ACCENT_LIGHT, BORDER, MUTED, TEXT, hotkey_field, semibold};
+use super::{ACCENT, ACCENT_LIGHT, BORDER, MUTED, TEXT, hotkey_field, semibold};
 use crate::engine::View;
 use crate::hotkeys::HotkeyAction;
 use crate::library::{clamp_region, fmt_time, frames_to_secs, secs_to_frames};
@@ -22,8 +22,10 @@ pub enum EditorAction {
     None,
     Done,
     Changed,
-    Preview(PadId),
+    /// Play source frames `from..to` to you only.
+    Listen { from: u64, to: u64, boost_db: f32 },
     StopPreview,
+    PlayForFriends(PadId),
     Capture(PadId),
     Delete(PadId),
 }
@@ -38,7 +40,7 @@ pub struct Editor {
     peaks: Option<Result<Vec<(f32, f32)>, String>>,
     rx: Receiver<Result<Vec<(f32, f32)>, String>>,
     selected: Option<PadId>,
-    previewing: Option<PadId>, // for the playhead, which follows it even if the selection moves
+    listen: Option<(u64, u64, f32)>, // the last Listen: the playhead counts from its start, Space resumes it
     drag: Option<Drag>,
     dirty: bool,
 }
@@ -49,7 +51,7 @@ impl Editor {
         std::thread::spawn(move || {
             let _ = tx.send(crate::decode::compute_peaks(&path, 256));
         });
-        Editor { source: src.id, peaks: None, rx, selected: None, previewing: None, drag: None, dirty: false }
+        Editor { source: src.id, peaks: None, rx, selected: None, listen: None, drag: None, dirty: false }
     }
 
     pub fn select(&mut self, pad: PadId) {
@@ -64,23 +66,45 @@ impl Editor {
         let mut action = EditorAction::None;
 
         ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                action = EditorAction::Done;
+            }
             let secs = frames_to_secs(src.frames, src.rate);
-            ui.label(egui::RichText::new(format!("Editing: {} ({})", src.name, fmt_time(secs))).font(semibold(16.0)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Done").clicked() {
-                    action = EditorAction::Done;
-                }
-            });
+            ui.label(egui::RichText::new(format!("{} ({})", src.name, fmt_time(secs))).font(semibold(16.0)));
         });
-        ui.label(egui::RichText::new("Original file is never changed").color(MUTED));
+        ui.label(
+            egui::RichText::new("Click anywhere to listen from there (only you hear it) · Space pauses · Drag across to mark a snippet")
+                .color(MUTED),
+        );
         ui.add_space(4.0);
 
-        self.waveform(ui, s, &src, view);
+        if let Some(a) = self.waveform(ui, s, &src, view) {
+            action = a;
+        }
         ui.add_space(6.0);
         self.chips(ui, s, &src);
         ui.add_space(6.0);
         if let Some(a) = self.fields(ui, s, &src, view, failed) {
             action = a;
+        }
+
+        // Space pauses and resumes listening, unless a text field has the keys.
+        if matches!(action, EditorAction::None)
+            && ui.input(|i| i.key_pressed(egui::Key::Space))
+            && ui.ctx().memory(|m| m.focused().is_none())
+        {
+            action = match (view.preview_secs, self.listen) {
+                (Some(secs), Some((from, to, boost_db))) => {
+                    self.listen = Some(((from + secs_to_frames(secs as f64, src.rate)).min(to), to, boost_db));
+                    EditorAction::StopPreview
+                }
+                (Some(_), None) => EditorAction::StopPreview,
+                (None, Some((from, to, boost_db))) => self.listen_range(from, to, boost_db),
+                (None, None) => match self.selected.and_then(|id| s.pads.iter().find(|p| p.id == id)) {
+                    Some(p) => self.listen_range(p.start, p.end, p.boost_db),
+                    None => self.listen_range(0, src.frames, 0.0),
+                },
+            };
         }
 
         let idle = !ui.input(|i| i.pointer.any_down()) && ui.ctx().memory(|m| m.focused().is_none());
@@ -91,7 +115,8 @@ impl Editor {
         action
     }
 
-    fn waveform(&mut self, ui: &mut egui::Ui, s: &mut Settings, src: &Source, view: &View) {
+    fn waveform(&mut self, ui: &mut egui::Ui, s: &mut Settings, src: &Source, view: &View) -> Option<EditorAction> {
+        let mut action = None;
         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 130.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 8.0, WAVE_BG);
@@ -145,9 +170,9 @@ impl Editor {
             let reg = Rect::from_x_y_ranges(x_of(anchor.min(current))..=x_of(anchor.max(current)), rect.y_range());
             p.rect(reg, 0.0, ACCENT_LIGHT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT_LIGHT), StrokeKind::Inside);
         }
-        if let (Some(secs), Some(pad)) = (view.preview_secs, self.previewing.and_then(|id| pads.iter().find(|(_, x)| x.id == id))) {
-            let f = pad.1.start + secs_to_frames(secs as f64, src.rate);
-            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(1.5, Color32::WHITE));
+        if let (Some(secs), Some((from, ..))) = (view.preview_secs, self.listen) {
+            let f = from + secs_to_frames(secs as f64, src.rate);
+            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(2.0, super::GREEN));
         }
         p.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
 
@@ -208,15 +233,28 @@ impl Editor {
                     self.selected = Some(id);
                     self.dirty = true;
                 } else {
-                    self.select_at(&pads, frame_at(r.interact_pointer_pos().map_or(rect.left(), |p| p.x)));
+                    action = Some(self.listen_at(&pads, frame_at(r.interact_pointer_pos().map_or(rect.left(), |p| p.x)), src));
                 }
             }
             self.drag = None;
         }
         if r.clicked()
             && let Some(pos) = r.interact_pointer_pos() {
-                self.select_at(&pads, frame_at(pos.x));
+                action = Some(self.listen_at(&pads, frame_at(pos.x), src));
             }
+        action
+    }
+
+    /// Select what's under `f`, and listen from there to the end of the song.
+    fn listen_at(&mut self, pads: &[(usize, Pad)], f: u64, src: &Source) -> EditorAction {
+        self.select_at(pads, f);
+        let boost_db = pads.iter().find(|(_, p)| Some(p.id) == self.selected).map_or(0.0, |(_, p)| p.boost_db);
+        self.listen_range(f, src.frames, boost_db)
+    }
+
+    fn listen_range(&mut self, from: u64, to: u64, boost_db: f32) -> EditorAction {
+        self.listen = Some((from, to, boost_db));
+        EditorAction::Listen { from, to, boost_db }
     }
 
     /// Pick the shortest region under the pointer, so sections win over the whole-song pad.
@@ -246,7 +284,7 @@ impl Editor {
     fn fields(&mut self, ui: &mut egui::Ui, s: &mut Settings, src: &Source, view: &View, failed: &[HotkeyAction]) -> Option<EditorAction> {
         let only_pad = s.pads.iter().filter(|p| p.source == src.id).count() <= 1;
         let Some(pad) = self.selected.and_then(|id| s.pads.iter_mut().find(|p| p.id == id)) else {
-            ui.label(egui::RichText::new("Drag across the waveform to mark a section, or click a section to edit it.").color(MUTED));
+            ui.label(egui::RichText::new("Click a snippet to edit it, or drag across the waveform to mark one.").color(MUTED));
             return None;
         };
         let mut action = None;
@@ -293,13 +331,17 @@ impl Editor {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            let friends = egui::Button::new(egui::RichText::new("▶ Play for friends").color(TEXT)).fill(ACCENT);
+            if ui.add(friends).on_hover_text("Adds this to the queue").clicked() {
+                action = Some(EditorAction::PlayForFriends(pad.id));
+            }
             if view.preview_secs.is_some() {
                 if ui.button("■ Stop preview").clicked() {
                     action = Some(EditorAction::StopPreview);
                 }
-            } else if ui.button("▶ Preview").on_hover_text("Plays to you only").clicked() {
-                action = Some(EditorAction::Preview(pad.id));
-                self.previewing = Some(pad.id);
+            } else if ui.button("▶ Preview").on_hover_text("Plays this part to you only").clicked() {
+                let (a, b, boost) = (pad.start, pad.end, pad.boost_db);
+                action = Some(self.listen_range(a, b, boost));
             }
             let del = ui.add_enabled(!only_pad, egui::Button::new("Delete section"));
             let del = if only_pad { del.on_disabled_hover_text("Delete the whole sound from the grid instead") } else { del };
@@ -321,11 +363,15 @@ mod tests {
     use egui::{Event, PointerButton, Pos2, RawInput};
 
     fn step(ctx: &egui::Context, ed: &mut Editor, s: &mut Settings, t: f64, events: Vec<Event>) -> EditorAction {
+        step_with(ctx, ed, s, t, events, &View::default())
+    }
+
+    fn step_with(ctx: &egui::Context, ed: &mut Editor, s: &mut Settings, t: f64, events: Vec<Event>, view: &View) -> EditorAction {
         let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(t), events, ..Default::default() };
         let mut out = None;
         // egui may run more than one pass per frame; keep the first real action, like the app does.
         let mut full = ctx.run_ui(raw, |ui| {
-            let a = ed.show(ui, s, &View::default(), &[]);
+            let a = ed.show(ui, s, view, &[]);
             if out.is_none() || !matches!(a, EditorAction::None) {
                 out = Some(a);
             }
@@ -334,16 +380,52 @@ mod tests {
         out.unwrap()
     }
 
-    #[test]
-    fn dragging_across_the_waveform_creates_a_section() {
+    fn setup() -> (egui::Context, Settings, Editor) {
         let ctx = egui::Context::default();
         super::super::setup_style(&ctx);
         let src = Source { id: 1, file: "missing.wav".into(), name: "Song".into(), rate: 1000, frames: 100_000, channels: 1 };
-        let mut s = Settings { sources: vec![src.clone()], pads: vec![crate::library::whole_pad(&src, 2)], next_id: 3, ..Default::default() };
-        let mut ed = Editor::open(&src, PathBuf::from("missing.wav"));
+        let s = Settings { sources: vec![src.clone()], pads: vec![crate::library::whole_pad(&src, 2)], next_id: 3, ..Default::default() };
+        let ed = Editor::open(&src, PathBuf::from("missing.wav"));
+        (ctx, s, ed)
+    }
+
+    const Y: f32 = 120.0; // inside the waveform (header + note take ~60 px)
+
+    fn press(x: f32, pressed: bool) -> Event {
+        Event::PointerButton { pos: Pos2::new(x, Y), button: PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn space() -> Event {
+        Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn clicking_the_waveform_listens_from_there_to_the_end() {
+        let (ctx, mut s, mut ed) = setup();
         step(&ctx, &mut ed, &mut s, 0.0, vec![]);
-        let y = 120.0; // inside the waveform (header + note take ~60 px)
-        let press = |x: f32, pressed| Event::PointerButton { pos: Pos2::new(x, y), button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(400.0, Y)), press(400.0, true)]);
+        let a = step(&ctx, &mut ed, &mut s, 0.15, vec![press(400.0, false)]);
+        let EditorAction::Listen { from, to, .. } = a else { panic!("expected Listen") };
+        assert!((from as i64 - 50_000).abs() < 2_000 && to == 100_000, "{from} {to}");
+    }
+
+    #[test]
+    fn space_pauses_where_it_got_to_and_resumes_from_there() {
+        let (ctx, mut s, mut ed) = setup();
+        step(&ctx, &mut ed, &mut s, 0.0, vec![]);
+        step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(400.0, Y)), press(400.0, true)]);
+        let EditorAction::Listen { from, .. } = step(&ctx, &mut ed, &mut s, 0.15, vec![press(400.0, false)]) else { panic!() };
+        let playing = View { preview_secs: Some(2.0), ..View::default() };
+        assert!(matches!(step_with(&ctx, &mut ed, &mut s, 0.2, vec![space()], &playing), EditorAction::StopPreview));
+        let EditorAction::Listen { from: resumed, to, .. } = step(&ctx, &mut ed, &mut s, 0.3, vec![space()]) else { panic!("expected Listen") };
+        assert_eq!((resumed, to), (from + 2_000, 100_000)); // 2 s in at 1 kHz
+    }
+
+    #[test]
+    fn dragging_across_the_waveform_creates_a_section() {
+        let (ctx, mut s, mut ed) = setup();
+        step(&ctx, &mut ed, &mut s, 0.0, vec![]);
+        let y = Y;
         step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(200.0, y)), press(200.0, true)]);
         for (i, x) in [260.0, 320.0, 400.0].into_iter().enumerate() {
             step(&ctx, &mut ed, &mut s, 0.2 + i as f64 * 0.05, vec![Event::PointerMoved(Pos2::new(x, y))]);
