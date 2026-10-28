@@ -172,7 +172,7 @@ impl Editor {
         }
         if let (Some(secs), Some((from, ..))) = (view.preview_secs, self.listen) {
             let f = from + secs_to_frames(secs as f64, src.rate);
-            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(2.0, super::GREEN));
+            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(2.0, Color32::WHITE));
         }
         p.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
 
@@ -290,6 +290,26 @@ impl Editor {
         let mut action = None;
         let dur = frames_to_secs(src.frames, src.rate);
         let min_len = secs_to_frames(0.05, src.rate).max(1);
+        ui.horizontal(|ui| {
+            let friends = egui::Button::new(egui::RichText::new("▶ Play for friends").color(TEXT)).fill(ACCENT);
+            if ui.add(friends).on_hover_text("Adds this to the queue").clicked() {
+                action = Some(EditorAction::PlayForFriends(pad.id));
+            }
+            if view.preview_secs.is_some() {
+                if ui.button("■ Stop preview").clicked() {
+                    action = Some(EditorAction::StopPreview);
+                }
+            } else if ui.button("▶ Preview").on_hover_text("Plays this part to you only").clicked() {
+                let (a, b, boost) = (pad.start, pad.end, pad.boost_db);
+                action = Some(self.listen_range(a, b, boost));
+            }
+            let del = ui.add_enabled(!only_pad, egui::Button::new("Delete snippet"));
+            let del = if only_pad { del.on_disabled_hover_text("Delete the whole sound from the grid instead") } else { del };
+            if del.clicked() {
+                action = Some(EditorAction::Delete(pad.id));
+            }
+        });
+        ui.add_space(8.0);
         egui::Grid::new("pad-fields").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
             ui.label(egui::RichText::new("Name").color(MUTED));
             if ui.add(egui::TextEdit::singleline(&mut pad.name).desired_width(260.0)).changed() {
@@ -328,26 +348,6 @@ impl Editor {
                 self.dirty = true;
             }
             ui.end_row();
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let friends = egui::Button::new(egui::RichText::new("▶ Play for friends").color(TEXT)).fill(ACCENT);
-            if ui.add(friends).on_hover_text("Adds this to the queue").clicked() {
-                action = Some(EditorAction::PlayForFriends(pad.id));
-            }
-            if view.preview_secs.is_some() {
-                if ui.button("■ Stop preview").clicked() {
-                    action = Some(EditorAction::StopPreview);
-                }
-            } else if ui.button("▶ Preview").on_hover_text("Plays this part to you only").clicked() {
-                let (a, b, boost) = (pad.start, pad.end, pad.boost_db);
-                action = Some(self.listen_range(a, b, boost));
-            }
-            let del = ui.add_enabled(!only_pad, egui::Button::new("Delete section"));
-            let del = if only_pad { del.on_disabled_hover_text("Delete the whole sound from the grid instead") } else { del };
-            if del.clicked() {
-                action = Some(EditorAction::Delete(pad.id));
-            }
         });
         action
     }

@@ -501,7 +501,7 @@ impl App {
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("UP NEXT").color(MUTED).size(11.0));
                 if view.up_next.is_empty() {
-                    ui.label(egui::RichText::new("Click a pad or press its hotkey to queue it.").color(MUTED));
+                    ui.label(egui::RichText::new("Press ▶ on a pad, or its hotkey, to queue it.").color(MUTED));
                     return;
                 }
                 let mut rows: Vec<Rect> = Vec::new();
