@@ -69,11 +69,16 @@ impl Voice {
                 }
             }
         dst[got * 2..].fill(0.0);
-        for f in dst[..got * 2].as_chunks_mut::<2>().0 {
+        for (k, f) in dst[..got * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let mut g = self.gain;
             if self.fade_in > 0 {
                 g *= 1.0 - self.fade_in as f32 / FADE_FRAMES as f32;
                 self.fade_in -= 1;
+            }
+            // The last 5 ms fade out, so a trimmed end or a section doesn't click.
+            let left = self.total - self.frames_done - k as u64;
+            if left < FADE_FRAMES as u64 {
+                g *= left as f32 / FADE_FRAMES as f32;
             }
             f[0] *= g;
             f[1] *= g;
@@ -146,6 +151,7 @@ pub struct OutputState {
     main: Option<Box<Voice>>,
     fading: Option<Box<Voice>>,
     fade_left: u32,
+    fade_gain: f32, // pause gain when it was replaced, so Stop while paused stays silent
     preview: Option<Box<Voice>>,
     mic: Option<MicIn>,
     limiter: Limiter,
@@ -180,6 +186,7 @@ impl OutputState {
             main: None,
             fading: None,
             fade_left: 0,
+            fade_gain: 1.0,
             preview: None,
             mic,
             limiter: Limiter::new(rate, LIMIT_THRESHOLD),
@@ -213,6 +220,7 @@ impl OutputState {
                             self.discard(f);
                         }
                         self.fade_left = FADE_FRAMES;
+                        self.fade_gain = self.pause_gain;
                     }
                     self.shared.main_entry.store(v.as_ref().map_or(0, |v| v.entry), Relaxed);
                     self.shared.main_frames.store(v.as_ref().map_or(0, |v| v.frames_done), Relaxed);
@@ -280,7 +288,7 @@ impl OutputState {
             let m = n.min(self.fade_left as usize);
             v.read(&mut tmp[..m * 2]);
             for f in 0..m {
-                let g = self.fade_left as f32 / FADE_FRAMES as f32 * self.pause_gain;
+                let g = self.fade_left as f32 / FADE_FRAMES as f32 * self.fade_gain;
                 mix[f * 2] += tmp[f * 2] * g;
                 mix[f * 2 + 1] += tmp[f * 2 + 1] * g;
                 self.fade_left -= 1;
@@ -348,7 +356,7 @@ mod tests {
         let (mut o, mut ctl, sh) = OutputState::new(2, 48_000, None);
         set_main(&mut ctl, Voice::new(5, 0, 100, pre(vec![0.25; 200]), None, 1.0, false));
         let b = run(&mut o, 2, 1000);
-        assert_eq!(b.iter().filter(|s| (**s - 0.25).abs() < 1e-6).count(), 200);
+        assert_eq!(b.iter().filter(|s| **s != 0.0).count(), 200);
         assert_eq!(sh.take_finished(), Some(5));
         assert_eq!(sh.take_finished(), None);
         assert!(ctl.trash.pop().is_ok());
@@ -362,7 +370,7 @@ mod tests {
             p.push(0.2).unwrap();
         }
         drop(p);
-        set_main(&mut ctl, Voice::new(1, 0, 100, pre(vec![0.1; 100]), Some(c), 1.0, false));
+        set_main(&mut ctl, Voice::new(1, 0, 1000, pre(vec![0.1; 100]), Some(c), 1.0, false));
         let b = run(&mut o, 2, 1000);
         let first = b.iter().position(|s| *s != 0.0).unwrap();
         assert!(b[first..first + 100].iter().all(|s| (s - 0.1).abs() < 1e-6));
@@ -401,7 +409,7 @@ mod tests {
         for (ch, check) in [(1usize, 0.25f32), (6, 0.5)] {
             let (mut o, mut ctl, _) = OutputState::new(ch, 48_000, None);
             let v: Vec<f32> = (0..400).map(|i| if i % 2 == 0 { 0.5 } else { 0.0 }).collect(); // L=0.5, R=0
-            set_main(&mut ctl, Voice::new(1, 0, 200, pre(v), None, 1.0, false));
+            set_main(&mut ctl, Voice::new(1, 0, 1000, pre(v), None, 1.0, false));
             let b = run(&mut o, ch, 1000);
             let f = b.chunks(ch).find(|f| f[0] != 0.0).unwrap();
             assert!((f[0] - check).abs() < 1e-6);
@@ -433,6 +441,27 @@ mod tests {
             last = run(&mut o, 2, 480);
         }
         assert!(last.iter().all(|s| (s - 0.1).abs() < 1e-3));
+    }
+
+    #[test]
+    fn voice_fades_out_at_its_end() {
+        let (mut o, mut ctl, _) = OutputState::new(2, 48_000, None);
+        set_main(&mut ctl, Voice::new(1, 0, 4800, pre(vec![0.5; 9600]), None, 1.0, false));
+        let b = run(&mut o, 2, 9600);
+        let last = b.iter().rposition(|s| *s != 0.0).unwrap();
+        assert!(b[last - 2000..].windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
+    }
+
+    #[test]
+    fn stop_while_paused_stays_silent() {
+        let (mut o, mut ctl, sh) = OutputState::new(2, 48_000, None);
+        set_main(&mut ctl, Voice::new(1, 0, 48_000, pre(vec![0.5; 96_000]), None, 1.0, false));
+        run(&mut o, 2, 4800);
+        sh.set_paused(true);
+        run(&mut o, 2, 4800);
+        sh.set_paused(false); // what Cmd::Stop does, along with SetMain(None)
+        assert!(ctl.cmds.push(OutCmd::SetMain(None)).is_ok());
+        assert!(run(&mut o, 2, 4800).iter().all(|s| s.abs() < 1e-6));
     }
 
     #[test]

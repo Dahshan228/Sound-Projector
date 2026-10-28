@@ -242,13 +242,16 @@ pub fn read_preroll(path: &Path, start: u64, end: u64, out_rate: u32, frames: us
 }
 
 /// Stream a region on its own thread into a ring of interleaved stereo at `out_rate`.
-/// Errors only if the file can't be opened; later errors just end the stream.
+/// Errors only if the file can't be opened; later errors just end the stream. The probe and seek run
+/// on the stream's thread, behind the preroll: an accurate MP3 seek can parse the file up to `start`.
 pub fn spawn_stream(path: &Path, start: u64, end: u64, out_rate: u32, skip_out_frames: u64) -> Result<rtrb::Consumer<f32>, String> {
-    let mut p = Pipeline::new(path, start, end, out_rate)?;
+    File::open(path).map_err(|e| e.to_string())?;
+    let path = path.to_path_buf();
     let (mut tx, rx) = rtrb::RingBuffer::new((out_rate as f32 * RING_SECONDS) as usize * 2);
     std::thread::Builder::new()
         .name("sp-stream".into())
         .spawn(move || {
+            let Ok(mut p) = Pipeline::new(&path, start, end, out_rate) else { return };
             let mut skip = (skip_out_frames * 2) as usize;
             let mut buf = Vec::with_capacity(CHUNK * 4);
             loop {

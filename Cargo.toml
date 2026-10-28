@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cpal = "0.18.2"
+cpal = { version = "0.18.2", features = ["realtime"] }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence", "accesskit"] }
 rfd = "0.17.2"
 rtrb = "0.4.1"

@@ -70,7 +70,6 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
-        let starting = || Err("Starting…".to_string());
         View {
             current: None,
             up_next: Vec::new(),
@@ -78,9 +77,9 @@ impl Default for View {
             dur_secs: 0.0,
             paused: false,
             preview_secs: None,
-            mic: starting(),
-            friends: starting(),
-            you: starting(),
+            mic: Ok(String::new()),
+            friends: Ok(String::new()),
+            you: Ok(String::new()),
             notice: None,
         }
     }
@@ -127,11 +126,42 @@ pub fn list_devices() -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
-/// Exact `wanted` name first, then the first name containing `auto_contains`. `None` = use the default.
-pub fn pick_device(names: &[String], wanted: Option<&str>, auto_contains: Option<&str>) -> Option<usize> {
-    wanted
-        .and_then(|w| names.iter().position(|n| n == w))
-        .or_else(|| auto_contains.and_then(|a| names.iter().position(|n| n.contains(a))))
+/// The picked name if it's there. Otherwise friends (`auto`) takes the first name containing it, and the
+/// others take Windows' default, or the first device when that's a VB-Cable end: the app must never hear
+/// its own cable as your mic, or play "You hear" into it.
+pub fn pick_device(names: &[String], picked: Option<&str>, auto: Option<&str>, default: Option<&str>) -> Option<usize> {
+    let mine = |n: &str| !n.contains("CABLE");
+    picked.and_then(|w| names.iter().position(|n| n == w)).or_else(|| match auto {
+        Some(a) => names.iter().position(|n| n.contains(a)),
+        None => default
+            .filter(|d| mine(d))
+            .and_then(|d| names.iter().position(|n| n == d))
+            .or_else(|| names.iter().position(|n| mine(n))),
+    })
+}
+
+/// The device (and its name) a slot should be on right now; see `pick_device`.
+fn find(input: bool, picked: Option<&str>, auto: Option<&str>) -> Option<(cpal::Device, String)> {
+    let host = cpal::default_host();
+    let (mut devs, default): (Vec<cpal::Device>, _) = if input {
+        (host.input_devices().map(|d| d.collect()).unwrap_or_default(), host.default_input_device())
+    } else {
+        (host.output_devices().map(|d| d.collect()).unwrap_or_default(), host.default_output_device())
+    };
+    let mut names: Vec<String> = devs.iter().map(device_name).collect();
+    let default_name = default.as_ref().map(device_name);
+    let i = pick_device(&names, picked, auto, default_name.as_deref())?;
+    let dev = match default {
+        // Windows' default itself rather than the same endpoint from the list, so cpal reports when it changes.
+        Some(d) if auto.is_none() && picked != Some(&names[i]) && default_name.as_ref() == Some(&names[i]) => d,
+        _ => devs.swap_remove(i),
+    };
+    Some((dev, names.swap_remove(i)))
+}
+
+/// Xruns and a refused real-time boost come through the error callback, but the stream keeps running.
+fn fatal(e: &cpal::Error) -> bool {
+    !matches!(e.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied)
 }
 
 const CABLE: &str = "CABLE Input";
@@ -267,10 +297,14 @@ impl Controller {
             Cmd::Skip => self.advance(),
             Cmd::Stop => {
                 self.queue.stop();
-                self.set_paused(false);
                 self.silence_all();
+                self.set_paused(false);
             }
-            Cmd::TogglePause => self.set_paused(!self.paused),
+            Cmd::TogglePause => {
+                if self.queue.current().is_some() {
+                    self.set_paused(!self.paused);
+                }
+            }
             Cmd::Seek(f) => {
                 if let Some(e) = self.queue.current()
                     && let Some(p) = self.pads.get(&e.pad) {
@@ -286,7 +320,7 @@ impl Controller {
                 if let Some(you) = self.you.as_mut() {
                     let total = out_frames(p.end - p.start, p.rate, you.rate);
                     match spawn_stream(&p.path, p.start, p.end, you.rate, 0) {
-                        Ok(s) => you.send(OutCmd::SetPreview(Some(Box::new(Voice::new(0, 0, total, None, Some(s), db_to_gain(p.boost_db), false))))),
+                        Ok(s) => you.send(OutCmd::SetPreview(Some(Box::new(Voice::new(0, 0, total, None, Some(s), db_to_gain(p.boost_db), p.start > 0))))),
                         Err(e) => self.notice(format!("Couldn't preview '{}': {e}", p.label())),
                     }
                 }
@@ -340,6 +374,7 @@ impl Controller {
             match self.queue.advance() {
                 None => {
                     self.silence_all();
+                    self.set_paused(false);
                     return;
                 }
                 Some(e) => {
@@ -365,7 +400,7 @@ impl Controller {
                     let pre = prerolls.get(&(p.id, rate)).cloned();
                     let pre_frames = pre.as_ref().map_or(0, |x| x.len() / 2) as u64;
                     let stream = if pre_frames >= total { None } else { Some(spawn_stream(&p.path, p.start, p.end, rate, pre_frames)?) };
-                    Voice::new(e.id, 0, total, pre, stream, gain, false)
+                    Voice::new(e.id, 0, total, pre, stream, gain, p.start > 0)
                 }
                 Some(at) => {
                     let offset = out_frames(at.saturating_sub(p.start), p.rate, rate);
@@ -448,17 +483,13 @@ impl Controller {
         self.friends = None;
         self.mic = None;
         self.mic_error.store(false, Relaxed);
-        let host = cpal::default_host();
-        let outs: Vec<cpal::Device> = host.output_devices().map(|d| d.collect()).unwrap_or_default();
-        let names: Vec<String> = outs.iter().map(device_name).collect();
-        let Some(i) = pick_device(&names, self.choice.friends.as_deref(), Some(CABLE)) else {
+        let Some((dev, name)) = find(false, self.choice.friends.as_deref(), Some(CABLE)) else {
             self.status.1 = Err("VB-Cable not found".into());
             self.status.0 = Err("Not in use until VB-Cable is set up".into());
             return;
         };
-        let dev = &outs[i];
         let rate = dev.default_output_config().map(|c| c.sample_rate()).unwrap_or(48_000);
-        let mic = match open_mic(&host, self.choice.mic.as_deref(), self.mic_error.clone()) {
+        let mic = match open_mic(self.choice.mic.as_deref(), self.mic_error.clone()) {
             Ok((stream, ring, mic_rate, name)) => {
                 self.mic = Some(stream);
                 self.status.0 = Ok(name);
@@ -469,9 +500,9 @@ impl Controller {
                 None
             }
         };
-        match open_output(dev, mic) {
+        match open_output(&dev, mic) {
             Ok(out) => {
-                self.status.1 = Ok(names[i].clone());
+                self.status.1 = Ok(name);
                 out.shared.set_paused(self.paused);
                 self.queue_prerolls(out.rate);
                 self.friends = Some(out);
@@ -486,20 +517,13 @@ impl Controller {
 
     fn open_you(&mut self) {
         self.you = None;
-        let host = cpal::default_host();
-        let outs: Vec<cpal::Device> = host.output_devices().map(|d| d.collect()).unwrap_or_default();
-        let names: Vec<String> = outs.iter().map(device_name).collect();
-        let dev = match pick_device(&names, self.choice.you.as_deref(), None) {
-            Some(i) => Some(outs[i].clone()),
-            None => host.default_output_device(),
-        };
-        let Some(dev) = dev else {
+        let Some((dev, name)) = find(false, self.choice.you.as_deref(), None) else {
             self.status.2 = Err("No headphones or speakers found".into());
             return;
         };
         match open_output(&dev, None) {
             Ok(out) => {
-                self.status.2 = Ok(device_name(&dev));
+                self.status.2 = Ok(name);
                 out.shared.set_paused(self.paused);
                 self.queue_prerolls(out.rate);
                 self.you = Some(out);
@@ -509,13 +533,25 @@ impl Controller {
         }
     }
 
-    /// Every couple of seconds: reopen any output that errored or is missing, and the mic if it errored
-    /// or a wanted one has appeared. Reopening the mic means reopening the friends output it feeds.
+    /// Every couple of seconds: reopen anything that errored (cpal also reports Windows' default
+    /// changing), is missing, or fell back from a picked device that has come back. Reopening the mic
+    /// means reopening the friends output it feeds, so a mic that's there but won't open (privacy
+    /// setting, held by another app) is tried on its own first, instead of rebuilding friends every pass.
     fn recover(&mut self) {
-        let friends_bad = self.friends.as_ref().is_none_or(|o| o.shared.take_error());
+        // Only enumerates while on a fallback, so a normal idle pass costs nothing.
+        let back = |picked: &Option<String>, using: &Result<String, String>, input: bool, auto: Option<&str>| {
+            picked.as_ref().is_some_and(|p| {
+                using.as_ref() != Ok(p) && find(input, Some(p), auto).is_some_and(|(_, n)| &n == p)
+            })
+        };
+        let friends_bad = self.friends.as_ref().is_none_or(|o| o.shared.take_error())
+            || back(&self.choice.friends, &self.status.1, false, Some(CABLE));
         let mic_bad = self.mic_error.swap(false, Relaxed)
-            || (self.mic.is_none() && self.friends.is_some() && mic_available(self.choice.mic.as_deref()));
-        let you_bad = self.you.as_ref().is_none_or(|o| o.shared.take_error());
+            || (self.friends.is_some()
+                && (self.mic.is_none() || back(&self.choice.mic, &self.status.0, true, None))
+                && open_mic(self.choice.mic.as_deref(), Arc::default()).is_ok());
+        let you_bad = self.you.as_ref().is_none_or(|o| o.shared.take_error())
+            || back(&self.choice.you, &self.status.2, false, None);
         if friends_bad || mic_bad {
             self.open_friends();
             if self.friends.is_some() {
@@ -581,26 +617,17 @@ impl Controller {
     }
 }
 
-fn mic_available(wanted: Option<&str>) -> bool {
-    let host = cpal::default_host();
-    match wanted {
-        Some(w) => host.input_devices().map(|mut ds| ds.any(|d| device_name(&d) == w)).unwrap_or(false),
-        None => host.default_input_device().is_some(),
-    }
-}
-
 /// Opens the mic (downmixed to mono) into a 1 s ring. Returns (stream, ring, rate, device name).
-fn open_mic(host: &cpal::Host, wanted: Option<&str>, err: Arc<AtomicBool>) -> Result<(cpal::Stream, rtrb::Consumer<f32>, u32, String), String> {
-    let ins: Vec<cpal::Device> = host.input_devices().map(|d| d.collect()).unwrap_or_default();
-    let names: Vec<String> = ins.iter().map(device_name).collect();
-    let dev = match pick_device(&names, wanted, None) {
-        Some(i) => ins[i].clone(),
-        None => host.default_input_device().ok_or("No microphone found")?,
-    };
+fn open_mic(wanted: Option<&str>, err: Arc<AtomicBool>) -> Result<(cpal::Stream, rtrb::Consumer<f32>, u32, String), String> {
+    let (dev, name) = find(true, wanted, None).ok_or("No microphone found")?;
     let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
     let (rate, ch) = (cfg.sample_rate(), cfg.channels() as usize);
     let (mut tx, rx) = rtrb::RingBuffer::new(rate as usize);
-    let on_err = move |_| err.store(true, Relaxed);
+    let on_err = move |e: cpal::Error| {
+        if fatal(&e) {
+            err.store(true, Relaxed)
+        }
+    };
     let stream = match cfg.sample_format() {
         cpal::SampleFormat::F32 => dev.build_input_stream::<f32, _, _>(
             cfg.into(),
@@ -626,7 +653,7 @@ fn open_mic(host: &cpal::Host, wanted: Option<&str>, err: Arc<AtomicBool>) -> Re
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, rx, rate, device_name(&dev)))
+    Ok((stream, rx, rate, name))
 }
 
 fn open_output(dev: &cpal::Device, mic: Option<MicIn>) -> Result<Out, String> {
@@ -634,7 +661,11 @@ fn open_output(dev: &cpal::Device, mic: Option<MicIn>) -> Result<Out, String> {
     let (rate, ch) = (cfg.sample_rate(), cfg.channels() as usize);
     let (mut state, ctl, shared) = OutputState::new(ch, rate, mic);
     let err_shared = shared.clone();
-    let on_err = move |_| err_shared.set_error();
+    let on_err = move |e: cpal::Error| {
+        if fatal(&e) {
+            err_shared.set_error()
+        }
+    };
     let stream = match cfg.sample_format() {
         cpal::SampleFormat::F32 => {
             dev.build_output_stream::<f32, _, _>(cfg.into(), move |data: &mut [f32], _| state.render(data), on_err, None)
@@ -670,11 +701,14 @@ mod tests {
     #[test]
     fn pick_device_rules() {
         let n: Vec<String> = ["Speakers (Realtek)", "CABLE Input (VB-Audio Virtual Cable)", "Headset"].map(String::from).to_vec();
-        assert_eq!(pick_device(&n, Some("Headset"), None), Some(2));
-        assert_eq!(pick_device(&n, None, Some("CABLE Input")), Some(1));
-        assert_eq!(pick_device(&n, Some("Gone"), Some("CABLE Input")), Some(1));
-        assert_eq!(pick_device(&n[..1], None, Some("CABLE Input")), None);
-        assert_eq!(pick_device(&n, None, None), None);
+        let cable = Some("CABLE Input (VB-Audio Virtual Cable)");
+        assert_eq!(pick_device(&n, Some("Headset"), None, None), Some(2));
+        assert_eq!(pick_device(&n, None, Some("CABLE Input"), None), Some(1));
+        assert_eq!(pick_device(&n, Some("Gone"), Some("CABLE Input"), None), Some(1));
+        assert_eq!(pick_device(&n[..1], None, Some("CABLE Input"), Some("Speakers (Realtek)")), None); // friends never falls back
+        assert_eq!(pick_device(&n, Some("Gone"), None, Some("Headset")), Some(2));
+        assert_eq!(pick_device(&n, None, None, cable), Some(0)); // a VB-Cable default is skipped
+        assert_eq!(pick_device(&n, cable, None, None), Some(1)); // unless picked
     }
 
     #[test]
