@@ -7,6 +7,7 @@ mod queue;
 mod settings;
 #[cfg(test)]
 mod testutil;
+mod voice;
 
 use eframe::egui;
 
