@@ -6,13 +6,16 @@ mod engine;
 mod hotkeys;
 mod icon;
 mod library;
+mod net;
 mod queue;
 mod settings;
 #[cfg(test)]
 mod testutil;
 mod tray;
 mod ui;
+mod updater;
 mod voice;
+mod youtube;
 
 use eframe::egui;
 
