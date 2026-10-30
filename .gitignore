@@ -5,9 +5,11 @@
 
 /target
 
-# Local audio downloads and Python environments
+# Local-only files: audio, the old download script and its links, tool caches
 /downloads/
-/song/*
-!/song/links.md
+/song/
+/scripts/
+/urls.txt
+/.impeccable/
 /.venv/
 __pycache__/

@@ -46,47 +46,6 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
 
 Your library lives in `%APPDATA%\SoundProjector\sounds\` (imported files are copies; originals are never touched), and everything else in `%APPDATA%\SoundProjector\settings.json`.
 
-## YouTube to MP3 script
-
-Use `scripts/yt_to_mp3.py` for videos you own or have permission to download.
-It accepts direct video links, including Shorts and `youtu.be` links. Search
-results and playlist URLs are not accepted.
-
-Install Python 3.10+ and the downloader:
-
-```powershell
-python -m pip install -U "yt-dlp[default]"
-```
-
-Install [FFmpeg](https://ffmpeg.org/download.html) and add its `bin` directory
-(containing both `ffmpeg.exe` and `ffprobe.exe`) to `PATH`. Install
-[Deno](https://docs.deno.com/runtime/getting_started/installation/) or a current
-[Node.js](https://nodejs.org/en/download) release, then reopen your terminal.
-These dependencies follow the [yt-dlp setup instructions](https://github.com/yt-dlp/yt-dlp#dependencies).
-
-Run from the project directory, replacing `VIDEO_ID` with your video's ID:
-
-```powershell
-python scripts/yt_to_mp3.py "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-For several videos, pass multiple quoted URLs or create `urls.txt` with one
-direct video URL per line (blank lines and lines starting with `#` are ignored):
-
-```powershell
-python scripts/yt_to_mp3.py --file urls.txt --bitrate 320
-```
-
-MP3s go into this project's `song/` folder by default, even when the script runs
-from another directory, with titles and video IDs in their filenames.
-Use `--output` to choose a different folder. Direct YouTube song links are
-saved in [song/links.md](song/links.md) as a reference list, not a download batch.
-Existing files are preserved. Failed videos are reported while the remaining
-links continue; any failure produces a nonzero exit code. Higher bitrates do not
-improve the original source's audio quality. Drag the resulting MP3s into Sound
-Projector to import them. If YouTube extraction stops working, update yt-dlp with
-the install command above.
-
 ## Building
 
 1. Install Rust with the GNU toolchain (no Visual Studio needed):
