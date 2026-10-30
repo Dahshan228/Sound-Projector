@@ -1,9 +1,9 @@
 use eframe::egui;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError};
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow};
@@ -31,24 +31,12 @@ pub fn show_window(hwnd: isize) {
     }
 }
 
-static SINGLE_INSTANCE: AtomicIsize = AtomicIsize::new(0);
-
 /// A named mutex lives as long as this process; a second copy sees it already exists.
 pub fn already_running() -> bool {
     let name = wide("SoundProjector.SingleInstance");
     unsafe {
-        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        let exists = GetLastError() == ERROR_ALREADY_EXISTS;
-        SINGLE_INSTANCE.store(handle as isize, Ordering::Relaxed);
-        exists
-    }
-}
-
-/// Lets the installer start before this process has finished quitting.
-pub fn release_single_instance() {
-    let handle = SINGLE_INSTANCE.swap(0, Ordering::Relaxed);
-    if handle != 0 {
-        unsafe { CloseHandle(handle as _) };
+        CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        GetLastError() == ERROR_ALREADY_EXISTS
     }
 }
 

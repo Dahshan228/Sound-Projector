@@ -43,6 +43,10 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     };
+    let update_failed = std::env::args().any(|a| a == "--update-failed").then(|| {
+        format!("The update didn't finish, so you're still on {}. Your songs and settings are fine.", env!("CARGO_PKG_VERSION"))
+    });
+    let notice = notice.or(update_failed);
     let options = eframe::NativeOptions {
         persist_window: true,
         viewport: egui::ViewportBuilder::default()

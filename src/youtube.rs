@@ -16,11 +16,13 @@ pub struct Job {
     pub url: String,
     pub source_id: u32,
     pub pad_id: PadId,
+    pub replaces: Option<u32>, // a song whose audio this upgrades, instead of a new pad
 }
 
 pub enum Event {
     Status(String),
     Added(PadId, Source),
+    Replaced(u32, Source),
     Failed(String),
 }
 
@@ -150,7 +152,10 @@ pub fn start(ctx: egui::Context) -> (Sender<Job>, Receiver<Event>) {
                 add(&job, &tools, &mut status)
             });
             let _ = event_tx.send(match r {
-                Ok(src) => Event::Added(job.pad_id, src),
+                Ok(src) => match job.replaces {
+                    Some(old) => Event::Replaced(old, src),
+                    None => Event::Added(job.pad_id, src),
+                },
                 Err(e) => Event::Failed(e),
             });
             ctx.request_repaint();

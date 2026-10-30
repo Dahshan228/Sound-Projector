@@ -1,5 +1,6 @@
-use crate::net::{download, fetch_text, sha256};
+use crate::net::{download, fetch_text, sha256, system_tool};
 use eframe::egui;
+use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -57,7 +58,25 @@ pub fn watch(ctx: egui::Context, tx: Sender<Update>) {
     });
 }
 
-/// Downloads and checks the installer, starts it, and quits. It reopens the app when it's done.
+/// Outlives the app: Setup can't replace a running exe, and only something still running can reopen the app if Setup fails.
+/// Setup reopens the app itself on success. Reading Handle is what makes PowerShell 5.1 keep the exit code.
+const RUN_SETUP: &str = "Wait-Process -Id $env:SP_APP_PID -ErrorAction SilentlyContinue; \
+    $p = Start-Process $env:SP_SETUP -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru; \
+    $null = $p.Handle; $p.WaitForExit(); \
+    if ($p.ExitCode -ne 0) { Start-Process $env:SP_APP -ArgumentList '--update-failed' }";
+
+fn start_setup(setup: &Path, app: &Path, app_pid: u32) -> Result<(), String> {
+    system_tool(r"WindowsPowerShell\v1.0\powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", RUN_SETUP])
+        .env("SP_SETUP", setup)
+        .env("SP_APP", app)
+        .env("SP_APP_PID", app_pid.to_string())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Downloads and checks the installer, hands over to it, and quits. Any error here leaves the app running as it was.
 pub fn install(u: &Update) -> Result<(), String> {
     let setup = std::env::temp_dir().join("SoundProjectorUpdate.exe");
     download(&u.url, &setup)?;
@@ -66,12 +85,8 @@ pub fn install(u: &Update) -> Result<(), String> {
         let _ = std::fs::remove_file(&setup);
         return Err("the download was damaged".into());
     }
-    // Setup won't start while the app holds this, and the app can't quit until Setup has started.
-    crate::tray::release_single_instance();
-    if let Err(e) = std::process::Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]).spawn() {
-        crate::tray::already_running(); // staying open, so take it back
-        return Err(e.to_string());
-    }
+    let app = std::env::current_exe().map_err(|e| e.to_string())?;
+    start_setup(&setup, &app, std::process::id())?;
     // ponytail: settings are saved on every change, so a hard exit loses nothing but eframe's last window-geometry autosave
     std::process::exit(0);
 }
@@ -108,5 +123,30 @@ mod tests {
         assert_eq!(parse_latest(&release("v0.2.0", "Other.exe", &digest), "0.1.1"), None);
         assert_eq!(parse_latest(&release("v0.2.0", ASSET, "md5:abc"), "0.1.1"), None);
         assert_eq!(parse_latest("not json", "0.1.1"), None);
+    }
+
+    /// Runs the real script with a stand-in installer. Returns the arguments the app was reopened with, if it was.
+    fn run_with_setup_exit_code(code: u32) -> Option<String> {
+        let dir = crate::testutil::temp_dir("setup");
+        let (setup, app, marker) = (dir.join("setup.bat"), dir.join("app.bat"), dir.join("reopened.txt"));
+        std::fs::write(&setup, format!("@exit /b {code}\r\n")).unwrap();
+        std::fs::write(&app, format!("@echo %* > \"{}\"\r\n", marker.display())).unwrap();
+        let mut running_app = std::process::Command::new("ping").args(["-n", "2", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        start_setup(&setup, &app, running_app.id()).unwrap();
+        let _ = running_app.wait();
+        for _ in 0..40 {
+            if let Ok(args) = std::fs::read_to_string(&marker) {
+                return Some(args.trim().to_string());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        None
+    }
+
+    #[test]
+    #[ignore] // opens console windows for a moment: cargo test setup_outcomes -- --ignored
+    fn setup_outcomes() {
+        assert_eq!(run_with_setup_exit_code(3).as_deref(), Some("--update-failed"));
+        assert_eq!(run_with_setup_exit_code(0), None); // Setup reopens the app itself
     }
 }
