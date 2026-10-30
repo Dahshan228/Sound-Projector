@@ -4,3 +4,10 @@
 # Added by cargo
 
 /target
+
+# Local audio downloads and Python environments
+/downloads/
+/song/*
+!/song/links.md
+/.venv/
+__pycache__/
