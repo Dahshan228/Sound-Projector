@@ -1,5 +1,7 @@
 # Sound Projector
 
+## [⬇ Download for Windows](https://github.com/Dahshan228/Sound-Projector/releases/latest/download/SoundProjectorSetup.exe)
+
 A lightweight Windows soundboard for Discord calls and in-game voice chat. Load your songs and sounds, trim them, boost them, and mark sections of a song without touching the original file. Queue them up with global hotkeys while you play. Your friends hear them through your mic, mixed with your voice, and you hear them in your headphones, each with its own volume slider.
 
 ## Download
@@ -7,7 +9,7 @@ A lightweight Windows soundboard for Discord calls and in-game voice chat. Load 
 1. Download **SoundProjectorSetup.exe** from the [latest release](https://github.com/Dahshan228/Sound-Projector/releases/latest) and run it.
 2. If Windows says "Windows protected your PC", click **More info**, then **Run anyway**. The installer isn't code-signed, so Windows doesn't recognise it yet.
 3. Click **Install**. If you don't have VB-Cable, Setup installs it too. Click **Yes** when Windows asks to allow it, click **Install** if Windows asks about the driver, then restart when Setup asks.
-4. Sound Projector opens with the setup guide below. The Discord steps are the only part left to do by hand.
+4. Sound Projector opens with the setup guide below, after the restart if there was one. The Discord steps are the only part left to do by hand.
 
 VB-CABLE is a free virtual audio cable by [VB-Audio Software](https://vb-audio.com/Cable/), bundled under their donationware terms. If you find it useful, consider donating to them.
 

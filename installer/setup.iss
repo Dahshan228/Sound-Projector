@@ -39,7 +39,9 @@ ReadyLabel2b=If VB-CABLE isn't installed yet, Setup installs it too. Sound Proje
 [Files]
 Source: "..\target\release\sound-projector.exe"; DestDir: "{app}"; DestName: "Sound Projector.exe"; Flags: ignoreversion
 Source: "..\target\vbcable\readme.txt"; DestDir: "{app}"; DestName: "VB-CABLE readme.txt"; Flags: ignoreversion
-Source: "..\target\vbcable\*"; DestDir: "{tmp}\vbcable"; Flags: deleteafterinstall recursesubdirs
+Source: "..\target\vbcable\*"; Excludes: "VBCABLE_Setup_x64.exe"; DestDir: "{tmp}\vbcable"; Flags: deleteafterinstall recursesubdirs
+; Last, so the app and the rest of VB-CABLE are in place. It has to run here because Setup asks NeedRestart before ssPostInstall.
+Source: "..\target\vbcable\VBCABLE_Setup_x64.exe"; DestDir: "{tmp}\vbcable"; Flags: deleteafterinstall; AfterInstall: InstallCable
 
 [Icons]
 Name: "{autodesktop}\Sound Projector"; Filename: "{app}\Sound Projector.exe"
@@ -60,16 +62,27 @@ begin
   Result := Exec(ExpandConstant('{app}\Sound Projector.exe'), '--has-vbcable', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+// Windows creates this service once the driver is accepted, before the restart its devices need.
+function CableDriverInstalled: Boolean;
+begin
+  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\VBAudioVACMME');
+end;
+
+procedure InstallCable;
 var
   Code: Integer;
 begin
-  if (CurStep = ssPostInstall) and not HasCable then
+  if not HasCable then
   begin
     WizardForm.StatusLabel.Caption := 'Installing VB-CABLE by VB-Audio...';
     // VB-CABLE's own setup needs admin, so this shows the Windows permission prompt. -i -h installs without its window.
-    if ShellExec('runas', ExpandConstant('{tmp}\vbcable\VBCABLE_Setup_x64.exe'), '-i -h', ExpandConstant('{tmp}\vbcable'), SW_SHOW, ewWaitUntilTerminated, Code) then
-      CableInstalled := True
+    // Its exit code isn't documented, so check the result instead.
+    if ShellExec('runas', ExpandConstant('{tmp}\vbcable\VBCABLE_Setup_x64.exe'), '-i -h', ExpandConstant('{tmp}\vbcable'), SW_SHOW, ewWaitUntilTerminated, Code) and CableDriverInstalled then
+    begin
+      CableInstalled := True;
+      // Setup can't open the app across the restart, so Windows does at the next sign-in.
+      RegWriteStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\RunOnce', 'SoundProjector', '"' + ExpandConstant('{app}\Sound Projector.exe') + '"');
+    end
     else
       MsgBox('VB-CABLE wasn''t installed, so friends won''t hear Sound Projector yet. You can install it later from vb-cable.com; the setup guide in Sound Projector''s Settings has the link.', mbInformation, MB_OK);
   end;
