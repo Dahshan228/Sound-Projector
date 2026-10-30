@@ -50,6 +50,10 @@ Name: "{autoprograms}\Sound Projector"; Filename: "{app}\Sound Projector.exe"
 [Run]
 Filename: "{app}\Sound Projector.exe"; Description: "Open Sound Projector"; Flags: nowait postinstall
 
+[UninstallDelete]
+; The YouTube tools can be downloaded again. The library and settings next to them stay.
+Type: filesandordirs; Name: "{userappdata}\SoundProjector\tools"
+
 [Code]
 var
   CableInstalled: Boolean;

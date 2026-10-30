@@ -3,7 +3,7 @@ pub mod settings_panel;
 
 use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View, Volumes};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
-use crate::library::{fmt_time, frames_to_secs, import, is_clip, whole_pad};
+use crate::library::{fmt_time, frames_to_secs, import, is_clip, replace_source, whole_pad};
 use crate::settings::{Hotkey, PadId, Settings, Source, settings_path, sounds_dir};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Rect, Sense, Stroke, StrokeKind, vec2};
 use std::path::PathBuf;
@@ -37,6 +37,13 @@ pub enum CaptureTarget {
 
 type ImportResult = (PathBuf, PadId, Result<Source, String>);
 
+#[derive(Default)]
+struct YoutubeDialog {
+    link: String,
+    error: Option<String>,
+    replaces: Option<u32>, // a song to upgrade, instead of adding a new pad
+}
+
 pub struct App {
     s: Settings,
     engine: Engine,
@@ -62,7 +69,7 @@ pub struct App {
     update_rx: Receiver<crate::updater::Update>,
     update_error_tx: Sender<String>,
     update_error_rx: Receiver<String>,
-    youtube_link: Option<(String, Option<String>)>, // the dialog's text and its error
+    youtube_dialog: Option<YoutubeDialog>,
     youtube_status: Option<String>,
     youtube_tx: Sender<crate::youtube::Job>,
     youtube_rx: Receiver<crate::youtube::Event>,
@@ -221,7 +228,7 @@ impl App {
             update_rx,
             update_error_tx,
             update_error_rx,
-            youtube_link: None,
+            youtube_dialog: None,
             youtube_status: None,
             youtube_tx,
             youtube_rx,
@@ -297,6 +304,30 @@ impl App {
                     self.s.pads.push(whole_pad(&src, pad_id));
                     self.s.sources.push(src);
                     self.sync();
+                }
+                crate::youtube::Event::Replaced(old_id, src) => {
+                    self.youtube_status = None;
+                    let new_file = src.file.clone();
+                    match replace_source(&mut self.s.sources, &mut self.s.pads, old_id, src) {
+                        Ok(old_file) => {
+                            // The preview holds the old audio's waveform and times.
+                            if self.editor.as_ref().is_some_and(|e| e.source == old_id) {
+                                let _ = self.tx.send(Cmd::StopPreview);
+                                self.editor = None;
+                            }
+                            let name = self.s.sources.iter().find(|s| s.id == old_id).map(|s| s.name.clone()).unwrap_or_default();
+                            self.set_notice(format!("Upgraded '{name}' to lossless. Its clips and hotkeys are unchanged."));
+                            // Delete the file only once the saved settings no longer point at it.
+                            // ponytail: if it's playing right now Windows refuses and it stays in the library folder, unused. Sweep unused files if that ever adds up.
+                            if self.sync() {
+                                let _ = std::fs::remove_file(sounds_dir().join(old_file));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_file(sounds_dir().join(new_file));
+                            self.set_notice(format!("Couldn't replace the audio: {e}"));
+                        }
+                    }
                 }
                 crate::youtube::Event::Failed(e) => {
                     self.youtube_status = None;
@@ -569,7 +600,7 @@ impl App {
                 });
             }
             if let Some((n, _)) = self.notice.clone() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(n).color(TEXT));
                     if ui.small_button("×").on_hover_text("Dismiss").clicked() {
                         self.notice = None;
@@ -713,24 +744,31 @@ impl App {
 
     fn grid(&mut self, ui: &mut egui::Ui, view: &View) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(12))).show(ui, |ui| {
+            let gap = 8.0;
+            let cols = ((ui.available_width() + gap) / 180.0).floor().max(1.0) as usize;
+            let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
+            // Above the scroll area, so they stay in reach however long the library gets.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                let tile = w.min((ui.available_width() - gap) / 2.0); // both fit even in one column
+                if add_tile(ui, tile, "+ Add", "or drop files here", "Add sounds") {
+                    self.pick_files();
+                }
+                if add_tile(ui, tile, "+ YouTube", "paste a video link", "Add from YouTube") {
+                    self.youtube_dialog = Some(YoutubeDialog::default());
+                }
+            });
+            ui.add_space(gap - ui.spacing().item_spacing.y);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let gap = 8.0;
-                let cols = ((ui.available_width() + gap) / 180.0).floor().max(1.0) as usize;
-                let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
                 let failed = self.hotkeys.failed();
                 let ids: Vec<PadId> = self.s.pads.iter().map(|p| p.id).collect();
-                let n = ids.len() + 2; // + Add and YouTube tiles
-                for row in 0..n.div_ceil(cols) {
+                for row in 0..ids.len().div_ceil(cols) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
                         for col in 0..cols {
                             let i = row * cols + col;
                             if i < ids.len() {
                                 self.pad_tile(ui, ids[i], w, view, &failed);
-                            } else if i == ids.len() && add_tile(ui, w, "+ Add", "or drop files here", "Add sounds") {
-                                self.pick_files();
-                            } else if i == ids.len() + 1 && add_tile(ui, w, "+ YouTube", "paste a video link", "Add from YouTube") {
-                                self.youtube_link = Some((String::new(), None));
                             }
                         }
                     });
@@ -811,6 +849,10 @@ impl App {
                 self.sync();
                 ui.close();
             }
+            if ui.button("Replace audio from YouTube…").clicked() {
+                self.youtube_dialog = Some(YoutubeDialog { replaces: Some(pad.source), ..Default::default() });
+                ui.close();
+            }
             if ui.button("Delete").clicked() {
                 self.confirm_delete = Some(id);
                 ui.close();
@@ -819,20 +861,24 @@ impl App {
     }
 
     fn youtube_dialog(&mut self, ctx: &egui::Context) {
-        let Some((mut link, mut error)) = self.youtube_link.take() else { return };
+        let Some(mut dialog) = self.youtube_dialog.take() else { return };
         let (mut keep, mut submit) = (true, false);
+        let title = if dialog.replaces.is_some() { "Replace audio from YouTube" } else { "Add from YouTube" };
         egui::Modal::new(Id::unique("youtube")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.label(egui::RichText::new("Add from YouTube").font(semibold(16.0)));
-            let r = ui.add(egui::TextEdit::singleline(&mut link).hint_text("https://www.youtube.com/watch?v=…").desired_width(f32::INFINITY));
+            ui.label(egui::RichText::new(title).font(semibold(16.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut dialog.link).hint_text("https://www.youtube.com/watch?v=…").desired_width(f32::INFINITY));
             r.request_focus();
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if let Some(e) = &error {
+            if let Some(e) = &dialog.error {
                 ui.label(egui::RichText::new(e).color(ERROR));
+            }
+            if dialog.replaces.is_some() {
+                ui.label(egui::RichText::new("Use the same version of the song, so its clips stay in the right places. Clips and hotkeys are kept.").color(MUTED));
             }
             ui.label(egui::RichText::new("Saved losslessly from YouTube's best audio. Only add videos you own or have permission to use.").color(MUTED));
             ui.horizontal(|ui| {
-                submit = ui.button("Add").clicked() || enter;
+                submit = ui.button(if dialog.replaces.is_some() { "Replace" } else { "Add" }).clicked() || enter;
                 // The field has no right-click menu, so this is the way to paste with the mouse.
                 if ui.button("Paste").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
@@ -843,18 +889,18 @@ impl App {
             });
         });
         if submit {
-            match crate::youtube::video_url(&link) {
+            match crate::youtube::video_url(&dialog.link) {
                 Ok(url) => {
-                    let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.s.new_id() };
+                    let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.s.new_id(), replaces: dialog.replaces };
                     let _ = self.youtube_tx.send(job);
                     self.youtube_status = Some("Getting ready to download from YouTube…".into());
                     keep = false;
                 }
-                Err(e) => error = Some(e),
+                Err(e) => dialog.error = Some(e),
             }
         }
         if keep {
-            self.youtube_link = Some((link, error));
+            self.youtube_dialog = Some(dialog);
         }
     }
 

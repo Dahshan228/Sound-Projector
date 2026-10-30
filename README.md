@@ -27,10 +27,11 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
 ## Using it
 
 - **Add sounds:** drop MP3, WAV, OGG or FLAC files on the window, or click **+ Add**.
-- **Add from YouTube:** click **+ YouTube** and paste a link to a video you own or have permission to use. The first time, the app downloads the tools it needs (about 160 MB). Audio is saved as lossless FLAC from YouTube's best stream, so it never goes through a second round of lossy compression. Songs you already added as MP3s stay at their old quality until you add them again.
+- **Add from YouTube:** click **+ YouTube** and paste a link to a video you own or have permission to use. The first time, the app downloads the tools it needs (about 160 MB). Audio is saved as lossless FLAC from YouTube's best stream, so it never goes through a second round of lossy compression.
+- **Upgrade a song:** right-click its pad, choose **Replace audio from YouTube…**, and paste a link to the same version of the song. All of that song's clips, hotkeys and boosts are kept. A video with a different length is refused, because the clips wouldn't line up.
 - **Play:** click a pad's ▶ or press its hotkey to add it to the queue. One item plays at a time.
 - **Preview and snippets:** click a pad to open its preview. Click anywhere on the waveform to hear it from there (only you hear it), press Space to pause, and drag across it to mark a snippet. **Play for friends** queues the selected snippet.
-- **Pad options:** right-click a pad to **Rename**, **Set hotkey…** or **Delete** it.
+- **Pad options:** right-click a pad to **Rename**, **Set hotkey…**, **Replace audio from YouTube…** or **Delete** it.
 - **Editor:**
   - drag across the waveform to mark a section (it becomes its own pad)
   - drag a section's edges to trim it
