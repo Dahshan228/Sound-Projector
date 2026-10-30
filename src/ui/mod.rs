@@ -833,6 +833,10 @@ impl App {
             ui.label(egui::RichText::new("Saved losslessly from YouTube's best audio. Only add videos you own or have permission to use.").color(MUTED));
             ui.horizontal(|ui| {
                 submit = ui.button("Add").clicked() || enter;
+                // The field has no right-click menu, so this is the way to paste with the mouse.
+                if ui.button("Paste").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
                 if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     keep = false;
                 }
