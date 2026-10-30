@@ -27,6 +27,7 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
 ## Using it
 
 - **Add sounds:** drop MP3, WAV, OGG or FLAC files on the window, or click **+ Add**.
+- **Add from YouTube:** click **+ YouTube** and paste a link to a video you own or have permission to use. The first time, the app downloads the tools it needs (about 160 MB). Audio is saved as lossless FLAC from YouTube's best stream, so it never goes through a second round of lossy compression. Songs you already added as MP3s stay at their old quality until you add them again.
 - **Play:** click a pad's ▶ or press its hotkey to add it to the queue. One item plays at a time.
 - **Preview and snippets:** click a pad to open its preview. Click anywhere on the waveform to hear it from there (only you hear it), press Space to pause, and drag across it to mark a snippet. **Play for friends** queues the selected snippet.
 - **Pad options:** right-click a pad to **Rename**, **Set hotkey…** or **Delete** it.
@@ -36,6 +37,7 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
   - set **Boost**
   - **Preview** plays it to you only
 - **Hotkeys:** pick keys your game doesn't use, like the numpad or F13–F24. Games may also see the key.
+- **Updates:** when a new version is out, click **Update now** in the banner. The app closes, updates and reopens by itself, and your songs and settings stay.
 - **Tray:** closing the window keeps the app running in the tray, so hotkeys still work. Quit from the tray menu.
 - **Settings (⚙):**
   - pick devices

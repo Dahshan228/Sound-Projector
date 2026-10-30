@@ -57,6 +57,15 @@ pub struct App {
     tray: Option<tray_icon::TrayIcon>,
     start_hidden: bool,
     first_run: bool, // no settings file yet: open Settings with the setup guide showing
+    update: Option<crate::updater::Update>,
+    updating: bool,
+    update_rx: Receiver<crate::updater::Update>,
+    update_error_tx: Sender<String>,
+    update_error_rx: Receiver<String>,
+    youtube_link: Option<(String, Option<String>)>, // the dialog's text and its error
+    youtube_status: Option<String>,
+    youtube_tx: Sender<crate::youtube::Job>,
+    youtube_rx: Receiver<crate::youtube::Event>,
 }
 
 fn volumes(s: &Settings) -> Volumes {
@@ -151,6 +160,18 @@ fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("semibold".into()))
 }
 
+/// A tile for adding sounds, at the end of the grid. Returns true when clicked.
+fn add_tile(ui: &mut egui::Ui, w: f32, title: &str, hint: &str, label: &str) -> bool {
+    let (rect, r) = ui.allocate_exact_size(vec2(w, 64.0), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let p = ui.painter();
+    p.rect(rect, 8.0, BG, Stroke::new(1.0, if r.hovered() { ACCENT_LIGHT } else { BORDER }), StrokeKind::Inside);
+    let inner = rect.shrink2(vec2(12.0, 10.0));
+    p.text(inner.left_top(), Align2::LEFT_TOP, title, semibold(14.0), TEXT);
+    p.text(inner.left_bottom(), Align2::LEFT_BOTTOM, hint, FontId::proportional(12.0), MUTED);
+    r.clicked()
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext, s: Settings, notice: Option<String>) -> App {
         setup_style(&cc.egui_ctx);
@@ -171,6 +192,10 @@ impl App {
         let (import_tx, import_rx) = channel();
         let show_request = Arc::new(AtomicBool::new(false));
         let tray = crate::tray::create_tray(cc.egui_ctx.clone(), show_request.clone());
+        let (update_tx, update_rx) = channel();
+        crate::updater::watch(cc.egui_ctx.clone(), update_tx);
+        let (update_error_tx, update_error_rx) = channel();
+        let (youtube_tx, youtube_rx) = crate::youtube::start(cc.egui_ctx.clone());
         let mut app = App {
             s,
             engine,
@@ -191,6 +216,15 @@ impl App {
             tray,
             start_hidden: std::env::args().any(|a| a == "--tray"),
             first_run: !settings_path().exists(),
+            update: None,
+            updating: false,
+            update_rx,
+            update_error_tx,
+            update_error_rx,
+            youtube_link: None,
+            youtube_status: None,
+            youtube_tx,
+            youtube_rx,
         };
         if app.s.start_with_windows {
             let _ = crate::tray::set_autostart(true); // the exe may have moved since it was turned on
@@ -251,6 +285,47 @@ impl App {
         if changed {
             self.sync();
         }
+    }
+
+    fn poll_youtube(&mut self) {
+        while let Ok(event) = self.youtube_rx.try_recv() {
+            match event {
+                crate::youtube::Event::Status(s) => self.youtube_status = Some(s),
+                crate::youtube::Event::Added(pad_id, src) => {
+                    self.youtube_status = None;
+                    self.set_notice(format!("Added '{}' from YouTube.", src.name));
+                    self.s.pads.push(whole_pad(&src, pad_id));
+                    self.s.sources.push(src);
+                    self.sync();
+                }
+                crate::youtube::Event::Failed(e) => {
+                    self.youtube_status = None;
+                    self.set_notice(format!("Couldn't add that video: {e}"));
+                }
+            }
+        }
+    }
+
+    fn poll_updates(&mut self) {
+        while let Ok(u) = self.update_rx.try_recv() {
+            self.update = Some(u);
+        }
+        while let Ok(e) = self.update_error_rx.try_recv() {
+            self.updating = false;
+            self.set_notice(format!("Couldn't update: {e}. Try again later."));
+        }
+    }
+
+    /// Quits on success, and the installer reopens the app.
+    fn start_update(&mut self, u: crate::updater::Update, ctx: &egui::Context) {
+        self.updating = true;
+        let (tx, ctx) = (self.update_error_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = crate::updater::install(&u) {
+                let _ = tx.send(e);
+                ctx.request_repaint();
+            }
+        });
     }
 
     fn pick_files(&mut self) {
@@ -458,10 +533,33 @@ impl App {
         if self.notice.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(6)) {
             self.notice = None;
         }
-        if lines.is_empty() && self.notice.is_none() {
+        if lines.is_empty() && self.notice.is_none() && self.update.is_none() && self.youtube_status.is_none() {
             return;
         }
         egui::Panel::top("banners").frame(egui::Frame::new().fill(WARN_BG).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
+            if let Some(u) = self.update.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    if self.updating {
+                        ui.spinner();
+                        ui.label(format!("Updating to {}. Sound Projector will close and reopen…", u.version));
+                    } else {
+                        ui.label(format!("Sound Projector {} is available.", u.version));
+                        if ui.button(egui::RichText::new("Update now").color(Color32::WHITE)).clicked() {
+                            let ctx = ui.ctx().clone();
+                            self.start_update(u, &ctx);
+                        }
+                        if ui.small_button("Later").clicked() {
+                            self.update = None;
+                        }
+                    }
+                });
+            }
+            if let Some(status) = &self.youtube_status {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spinner();
+                    ui.label(status);
+                });
+            }
             for l in &lines {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(l).color(WARN));
@@ -621,7 +719,7 @@ impl App {
                 let w = (ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32;
                 let failed = self.hotkeys.failed();
                 let ids: Vec<PadId> = self.s.pads.iter().map(|p| p.id).collect();
-                let n = ids.len() + 1; // + Add tile
+                let n = ids.len() + 2; // + Add and YouTube tiles
                 for row in 0..n.div_ceil(cols) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
@@ -629,8 +727,10 @@ impl App {
                             let i = row * cols + col;
                             if i < ids.len() {
                                 self.pad_tile(ui, ids[i], w, view, &failed);
-                            } else if i == ids.len() {
-                                self.add_tile(ui, w);
+                            } else if i == ids.len() && add_tile(ui, w, "+ Add", "or drop files here", "Add sounds") {
+                                self.pick_files();
+                            } else if i == ids.len() + 1 && add_tile(ui, w, "+ YouTube", "paste a video link", "Add from YouTube") {
+                                self.youtube_link = Some((String::new(), None));
                             }
                         }
                     });
@@ -718,20 +818,44 @@ impl App {
         });
     }
 
-    fn add_tile(&mut self, ui: &mut egui::Ui, w: f32) {
-        let (rect, r) = ui.allocate_exact_size(vec2(w, 64.0), Sense::click());
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add sounds"));
-        let p = ui.painter();
-        p.rect(rect, 8.0, BG, Stroke::new(1.0, if r.hovered() { ACCENT_LIGHT } else { BORDER }), StrokeKind::Inside);
-        let inner = rect.shrink2(vec2(12.0, 10.0));
-        p.text(inner.left_top(), Align2::LEFT_TOP, "+ Add", semibold(14.0), TEXT);
-        p.text(inner.left_bottom(), Align2::LEFT_BOTTOM, "or drop files here", FontId::proportional(12.0), MUTED);
-        if r.clicked() {
-            self.pick_files();
+    fn youtube_dialog(&mut self, ctx: &egui::Context) {
+        let Some((mut link, mut error)) = self.youtube_link.take() else { return };
+        let (mut keep, mut submit) = (true, false);
+        egui::Modal::new(Id::unique("youtube")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(egui::RichText::new("Add from YouTube").font(semibold(16.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut link).hint_text("https://www.youtube.com/watch?v=…").desired_width(f32::INFINITY));
+            r.request_focus();
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if let Some(e) = &error {
+                ui.label(egui::RichText::new(e).color(ERROR));
+            }
+            ui.label(egui::RichText::new("Saved losslessly from YouTube's best audio. Only add videos you own or have permission to use.").color(MUTED));
+            ui.horizontal(|ui| {
+                submit = ui.button("Add").clicked() || enter;
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                }
+            });
+        });
+        if submit {
+            match crate::youtube::video_url(&link) {
+                Ok(url) => {
+                    let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.s.new_id() };
+                    let _ = self.youtube_tx.send(job);
+                    self.youtube_status = Some("Getting ready to download from YouTube…".into());
+                    keep = false;
+                }
+                Err(e) => error = Some(e),
+            }
+        }
+        if keep {
+            self.youtube_link = Some((link, error));
         }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.youtube_dialog(ctx);
         if let Some((target, _)) = self.capture {
             let current = self.key_of(target);
             egui::Modal::new(Id::unique("capture")).show(ctx, |ui| {
@@ -818,6 +942,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_imports();
+        self.poll_youtube();
+        self.poll_updates();
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if !dropped.is_empty() {
             self.import_paths(dropped);
