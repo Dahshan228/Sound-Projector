@@ -32,6 +32,14 @@ pub struct Pad {
     pub end: u64,
     pub boost_db: f32,
     pub hotkey: Option<Hotkey>,
+    pub group: Option<u32>,
+}
+
+/// A set of pads the user named. A pad is in one group at most.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Group {
+    pub id: u32,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -39,6 +47,7 @@ pub struct Pad {
 pub struct Settings {
     pub sources: Vec<Source>,
     pub pads: Vec<Pad>,
+    pub groups: Vec<Group>,
     pub next_id: u32,
     pub friends_volume: f32,
     pub you_volume: f32,
@@ -57,6 +66,7 @@ impl Default for Settings {
         Settings {
             sources: Vec::new(),
             pads: Vec::new(),
+            groups: Vec::new(),
             next_id: 1,
             friends_volume: 0.8,
             you_volume: 0.5,
@@ -121,6 +131,14 @@ impl Settings {
         self.next_id = id + 1;
         id
     }
+
+    /// Its pads stay in the library, just no longer in a group.
+    pub fn delete_group(&mut self, id: u32) {
+        self.groups.retain(|g| g.id != id);
+        for p in self.pads.iter_mut().filter(|p| p.group == Some(id)) {
+            p.group = None;
+        }
+    }
 }
 
 pub fn app_dir() -> PathBuf {
@@ -158,7 +176,8 @@ mod tests {
         let d = temp_dir("roundtrip");
         let p = d.join("settings.json");
         let mut s = Settings::default();
-        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }) });
+        s.groups.push(Group { id: 7, name: "Memes".into() });
+        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7) });
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().0, s);
         assert!(!d.join("settings.json.tmp").exists());
@@ -199,5 +218,24 @@ mod tests {
         std::fs::write(&p, r#"{"friends_volume":0.3,"future_field":1}"#).unwrap();
         let (s, notice) = Settings::load(&p).unwrap();
         assert_eq!((s.friends_volume, s.you_volume, s.boost_db, notice), (0.3, 0.5, 0.0, None));
+    }
+
+    #[test]
+    fn a_library_from_before_groups_keeps_its_pads() {
+        let d = temp_dir("old-library");
+        let p = d.join("settings.json");
+        std::fs::write(&p, r#"{"pads":[{"id":1,"source":1,"name":"Drop","start":10,"end":20,"boost_db":6.0,"hotkey":null}]}"#).unwrap();
+        let (s, notice) = Settings::load(&p).unwrap();
+        assert_eq!((s.pads.len(), s.pads[0].group, s.groups.len(), notice), (1, None, 0, None));
+    }
+
+    #[test]
+    fn deleting_a_group_keeps_its_pads() {
+        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group };
+        let mut s = Settings { pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)], ..Settings::default() };
+        s.groups = vec![Group { id: 7, name: "Memes".into() }, Group { id: 8, name: "Songs".into() }];
+        s.delete_group(7);
+        assert_eq!(s.groups, vec![Group { id: 8, name: "Songs".into() }]);
+        assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![None, Some(8), None]);
     }
 }

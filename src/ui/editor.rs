@@ -227,7 +227,8 @@ impl Editor {
                     let (start, end) = clamp_region(anchor, current, src.frames, min_len);
                     let n = s.pads.iter().filter(|p| p.source == src.id && p.name.starts_with("Section")).count() + 1;
                     let id = s.new_id();
-                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None };
+                    let group = s.pads.iter().find(|p| Some(p.id) == self.selected).and_then(|p| p.group);
+                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None, group };
                     let at = s.pads.iter().rposition(|p| p.source == src.id).map_or(s.pads.len(), |i| i + 1);
                     s.pads.insert(at, pad);
                     self.selected = Some(id);
@@ -439,5 +440,19 @@ mod tests {
         let (want_a, want_b) = ((200.0 / width * 100_000.0) as i64, (400.0 / width * 100_000.0) as i64);
         assert!((sec.start as i64 - want_a).abs() < 2_000 && (sec.end as i64 - want_b).abs() < 2_000, "{} {}", sec.start, sec.end);
         assert!(matches!(released, EditorAction::Changed)); // saved as soon as the mouse is let go
+    }
+
+    #[test]
+    fn a_new_section_joins_the_group_of_the_pad_it_came_from() {
+        let (ctx, mut s, mut ed) = setup();
+        s.pads[0].group = Some(7);
+        ed.select(2);
+        step(&ctx, &mut ed, &mut s, 0.0, vec![]);
+        step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(200.0, Y)), press(200.0, true)]);
+        for (i, x) in [260.0, 320.0, 400.0].into_iter().enumerate() {
+            step(&ctx, &mut ed, &mut s, 0.2 + i as f64 * 0.05, vec![Event::PointerMoved(Pos2::new(x, Y))]);
+        }
+        step(&ctx, &mut ed, &mut s, 0.5, vec![press(400.0, false)]);
+        assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![Some(7), Some(7)]);
     }
 }

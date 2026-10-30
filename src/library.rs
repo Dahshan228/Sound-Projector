@@ -17,7 +17,7 @@ pub fn import(path: &Path, sounds_dir: &Path, id: u32) -> Result<Source, String>
 }
 
 pub fn whole_pad(src: &Source, id: PadId) -> Pad {
-    Pad { id, source: src.id, name: src.name.clone(), start: 0, end: src.frames, boost_db: 0.0, hotkey: None }
+    Pad { id, source: src.id, name: src.name.clone(), start: 0, end: src.frames, boost_db: 0.0, hotkey: None, group: None }
 }
 
 /// How far apart two copies of a song can be in length and still be the same recording.
@@ -101,7 +101,7 @@ mod tests {
     }
 
     fn pad(id: PadId, source: u32, start: u64, end: u64) -> Pad {
-        Pad { id, source, name: format!("pad {id}"), start, end, boost_db: 3.0, hotkey: None }
+        Pad { id, source, name: format!("pad {id}"), start, end, boost_db: 3.0, hotkey: None, group: None }
     }
 
     #[test]

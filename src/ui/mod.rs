@@ -4,8 +4,9 @@ pub mod settings_panel;
 use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View, Volumes};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
 use crate::library::{fmt_time, frames_to_secs, import, is_clip, replace_source, whole_pad};
-use crate::settings::{Hotkey, PadId, Settings, Source, settings_path, sounds_dir};
+use crate::settings::{Group, Hotkey, PadId, Settings, Source, settings_path, sounds_dir};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Rect, Sense, Stroke, StrokeKind, vec2};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +45,13 @@ struct YoutubeDialog {
     replaces: Option<u32>, // a song to upgrade, instead of adding a new pad
 }
 
+#[derive(Default)]
+struct GroupDialog {
+    renames: Option<u32>, // otherwise makes a new group
+    name: String,
+    pad: Option<PadId>, // goes into the new group
+}
+
 pub struct App {
     s: Settings,
     engine: Engine,
@@ -73,6 +81,10 @@ pub struct App {
     youtube_status: Option<String>,
     youtube_tx: Sender<crate::youtube::Job>,
     youtube_rx: Receiver<crate::youtube::Event>,
+    group_view: Option<u32>, // None shows every pad
+    group_dialog: Option<GroupDialog>,
+    confirm_delete_group: Option<Group>,
+    new_pad_groups: HashMap<PadId, u32>, // sounds still on their way, and the group that was open when they were added
 }
 
 fn volumes(s: &Settings) -> Volumes {
@@ -232,6 +244,10 @@ impl App {
             youtube_status: None,
             youtube_tx,
             youtube_rx,
+            group_view: None,
+            group_dialog: None,
+            confirm_delete_group: None,
+            new_pad_groups: HashMap::new(),
         };
         if app.s.start_with_windows {
             let _ = crate::tray::set_autostart(true); // the exe may have moved since it was turned on
@@ -262,8 +278,24 @@ impl App {
         self.notice = Some((msg, Instant::now()));
     }
 
+    /// The id for a pad that's on its way. It joins whichever group is open now.
+    fn new_pad_id(&mut self) -> PadId {
+        let id = self.s.new_id();
+        if let Some(g) = self.group_view {
+            self.new_pad_groups.insert(id, g);
+        }
+        id
+    }
+
+    fn add_pad(&mut self, src: Source, pad_id: PadId) {
+        let mut pad = whole_pad(&src, pad_id);
+        pad.group = self.new_pad_groups.remove(&pad_id).filter(|g| self.s.groups.iter().any(|x| x.id == *g)); // it may have been deleted meanwhile
+        self.s.pads.push(pad);
+        self.s.sources.push(src);
+    }
+
     fn import_paths(&mut self, paths: Vec<PathBuf>) {
-        let jobs: Vec<(PathBuf, u32, PadId)> = paths.into_iter().map(|p| (p, self.s.new_id(), self.s.new_id())).collect();
+        let jobs: Vec<(PathBuf, u32, PadId)> = paths.into_iter().map(|p| (p, self.s.new_id(), self.new_pad_id())).collect();
         let tx = self.import_tx.clone();
         std::thread::spawn(move || {
             let dir = sounds_dir();
@@ -279,8 +311,7 @@ impl App {
         while let Ok((path, pad_id, r)) = self.import_rx.try_recv() {
             match r {
                 Ok(src) => {
-                    self.s.pads.push(whole_pad(&src, pad_id));
-                    self.s.sources.push(src);
+                    self.add_pad(src, pad_id);
                     changed = true;
                 }
                 Err(_) => {
@@ -301,8 +332,7 @@ impl App {
                 crate::youtube::Event::Added(pad_id, src) => {
                     self.youtube_status = None;
                     self.set_notice(format!("Added '{}' from YouTube.", src.name));
-                    self.s.pads.push(whole_pad(&src, pad_id));
-                    self.s.sources.push(src);
+                    self.add_pad(src, pad_id);
                     self.sync();
                 }
                 crate::youtube::Event::Replaced(old_id, src) => {
@@ -565,6 +595,8 @@ impl App {
             self.notice = None;
         }
         if lines.is_empty() && self.notice.is_none() && self.update.is_none() && self.youtube_status.is_none() {
+            // Without the panel, everything after it would get new ids, closing any open menu when a message goes away.
+            ui.skip_ahead_auto_ids(1);
             return;
         }
         egui::Panel::top("banners").frame(egui::Frame::new().fill(WARN_BG).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
@@ -759,9 +791,14 @@ impl App {
                 }
             });
             ui.add_space(gap - ui.spacing().item_spacing.y);
+            self.group_row(ui);
+            ui.add_space(gap - ui.spacing().item_spacing.y);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let failed = self.hotkeys.failed();
-                let ids: Vec<PadId> = self.s.pads.iter().map(|p| p.id).collect();
+                let ids: Vec<PadId> = self.s.pads.iter().filter(|p| self.group_view.is_none_or(|g| p.group == Some(g))).map(|p| p.id).collect();
+                if ids.is_empty() && self.group_view.is_some() {
+                    ui.label(egui::RichText::new("Nothing in this group yet. Right-click a pad under All to put it here, or add a sound while this group is open.").color(MUTED));
+                }
                 for row in 0..ids.len().div_ceil(cols) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
@@ -776,6 +813,35 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Choosing a group only changes which pads show. Every pad's hotkey keeps working.
+    fn group_row(&mut self, ui: &mut egui::Ui) {
+        // About two and a half rows, so a long list scrolls instead of pushing the pads out of the window.
+        egui::ScrollArea::vertical().id_salt("groups").max_height(88.0).auto_shrink([false, true]).show(ui, |ui| ui.horizontal_wrapped(|ui| {
+            if ui.selectable_label(self.group_view.is_none(), "All").clicked() {
+                self.group_view = None;
+            }
+            for g in self.s.groups.clone() {
+                let r = ui.selectable_label(self.group_view == Some(g.id), &g.name);
+                if r.clicked() {
+                    self.group_view = Some(g.id);
+                }
+                r.context_menu(|ui| {
+                    if ui.button("Rename group").clicked() {
+                        self.group_dialog = Some(GroupDialog { renames: Some(g.id), name: g.name.clone(), pad: None });
+                        ui.close();
+                    }
+                    if ui.button("Delete group").clicked() {
+                        self.confirm_delete_group = Some(g.clone());
+                        ui.close();
+                    }
+                });
+            }
+            if ui.button("+ Group").on_hover_text("Name a group, then right-click pads to put them in it").clicked() {
+                self.group_dialog = Some(GroupDialog::default());
+            }
+        }));
     }
 
     fn pad_tile(&mut self, ui: &mut egui::Ui, id: PadId, w: f32, view: &View, failed: &[HotkeyAction]) {
@@ -849,6 +915,28 @@ impl App {
                 self.sync();
                 ui.close();
             }
+            ui.menu_button("Group", |ui| {
+                let mut choice = None;
+                for g in &self.s.groups {
+                    if ui.selectable_label(pad.group == Some(g.id), &g.name).clicked() {
+                        choice = Some(Some(g.id));
+                    }
+                }
+                if pad.group.is_some() && ui.button("Remove from group").clicked() {
+                    choice = Some(None);
+                }
+                if ui.button("New group…").clicked() {
+                    self.group_dialog = Some(GroupDialog { pad: Some(id), ..Default::default() });
+                    ui.close();
+                }
+                if let Some(group) = choice {
+                    if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
+                        p.group = group;
+                    }
+                    self.save();
+                    ui.close();
+                }
+            });
             if ui.button("Replace audio from YouTube…").clicked() {
                 self.youtube_dialog = Some(YoutubeDialog { replaces: Some(pad.source), ..Default::default() });
                 ui.close();
@@ -891,7 +979,7 @@ impl App {
         if submit {
             match crate::youtube::video_url(&dialog.link) {
                 Ok(url) => {
-                    let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.s.new_id(), replaces: dialog.replaces };
+                    let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.new_pad_id(), replaces: dialog.replaces };
                     let _ = self.youtube_tx.send(job);
                     self.youtube_status = Some("Getting ready to download from YouTube…".into());
                     keep = false;
@@ -904,8 +992,73 @@ impl App {
         }
     }
 
+    fn group_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.group_dialog.take() else { return };
+        let (mut keep, mut submit) = (true, false);
+        let clean = dialog.name.trim().to_string();
+        let taken = self.s.groups.iter().any(|g| Some(g.id) != dialog.renames && g.name.to_lowercase() == clean.to_lowercase());
+        let valid = !clean.is_empty() && !taken;
+        egui::Modal::new(Id::unique("group")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.label(egui::RichText::new(if dialog.renames.is_some() { "Rename group" } else { "New group" }).font(semibold(16.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut dialog.name).char_limit(30).desired_width(f32::INFINITY));
+            r.request_focus();
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if taken {
+                ui.label(egui::RichText::new("You already have a group with that name.").color(ERROR));
+            }
+            ui.horizontal(|ui| {
+                let save = ui.add_enabled(valid, egui::Button::new(if dialog.renames.is_some() { "Save" } else { "Create" }));
+                submit = valid && (save.clicked() || enter);
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                }
+            });
+        });
+        if submit {
+            keep = false;
+            if let Some(id) = dialog.renames {
+                if let Some(g) = self.s.groups.iter_mut().find(|g| g.id == id) {
+                    g.name = clean;
+                }
+            } else {
+                let id = self.s.new_id();
+                self.set_notice(if dialog.pad.is_some() { format!("Added to '{clean}'.") } else { format!("Made '{clean}'. Right-click a pad to put it in this group.") });
+                self.s.groups.push(Group { id, name: clean });
+                if let Some(p) = self.s.pads.iter_mut().find(|p| Some(p.id) == dialog.pad) {
+                    p.group = Some(id);
+                }
+            }
+            self.save();
+        }
+        if keep {
+            self.group_dialog = Some(dialog);
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.youtube_dialog(ctx);
+        self.group_dialog(ctx);
+        if let Some(group) = self.confirm_delete_group.clone() {
+            egui::Modal::new(Id::unique("delete group")).show(ctx, |ui| {
+                ui.set_width(300.0);
+                ui.label(egui::RichText::new(format!("Delete the group '{}'?", group.name)).font(semibold(16.0)));
+                ui.label(egui::RichText::new("Its pads stay in your library.").color(MUTED));
+                ui.horizontal(|ui| {
+                    if ui.button(egui::RichText::new("Delete group").color(ERROR)).clicked() {
+                        self.confirm_delete_group = None;
+                        self.s.delete_group(group.id);
+                        if self.group_view == Some(group.id) {
+                            self.group_view = None;
+                        }
+                        self.save();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_group = None;
+                    }
+                });
+            });
+        }
         if let Some((target, _)) = self.capture {
             let current = self.key_of(target);
             egui::Modal::new(Id::unique("capture")).show(ctx, |ui| {
