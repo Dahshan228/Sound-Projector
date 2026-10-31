@@ -42,6 +42,8 @@ pub struct Pad {
 pub struct Group {
     pub id: u32,
     pub name: String,
+    #[serde(default)]
+    pub instant: bool, // pads that join get `Pad::instant`
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -141,6 +143,25 @@ impl Settings {
             p.group = None;
         }
     }
+
+    /// For the whole group at once. A pad can still be changed on its own afterwards.
+    pub fn set_group_instant(&mut self, id: u32, on: bool) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
+            g.instant = on;
+        }
+        for p in self.pads.iter_mut().filter(|p| p.group == Some(id)) {
+            p.instant = on;
+        }
+    }
+
+    /// Joining an instant group makes a pad instant. Moving never turns it off.
+    pub fn set_pad_group(&mut self, pad: PadId, group: Option<u32>) {
+        let joins_instant = self.groups.iter().any(|g| Some(g.id) == group && g.instant);
+        if let Some(p) = self.pads.iter_mut().find(|p| p.id == pad) {
+            p.group = group;
+            p.instant |= joins_instant;
+        }
+    }
 }
 
 pub fn app_dir() -> PathBuf {
@@ -178,7 +199,7 @@ mod tests {
         let d = temp_dir("roundtrip");
         let p = d.join("settings.json");
         let mut s = Settings::default();
-        s.groups.push(Group { id: 7, name: "Memes".into() });
+        s.groups.push(Group { id: 7, name: "Memes".into(), instant: true });
         s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7), instant: true });
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().0, s);
@@ -235,9 +256,50 @@ mod tests {
     fn deleting_a_group_keeps_its_pads() {
         let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false };
         let mut s = Settings { pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)], ..Settings::default() };
-        s.groups = vec![Group { id: 7, name: "Memes".into() }, Group { id: 8, name: "Songs".into() }];
+        s.groups = vec![Group { id: 7, name: "Memes".into(), instant: false }, Group { id: 8, name: "Songs".into(), instant: false }];
         s.delete_group(7);
-        assert_eq!(s.groups, vec![Group { id: 8, name: "Songs".into() }]);
+        assert_eq!(s.groups, vec![Group { id: 8, name: "Songs".into(), instant: false }]);
         assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![None, Some(8), None]);
+    }
+
+    fn two_groups_three_pads() -> Settings {
+        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false };
+        Settings {
+            pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)],
+            groups: vec![Group { id: 7, name: "Memes".into(), instant: false }, Group { id: 8, name: "Songs".into(), instant: false }],
+            ..Settings::default()
+        }
+    }
+    fn instants(s: &Settings) -> Vec<bool> {
+        s.pads.iter().map(|p| p.instant).collect()
+    }
+
+    #[test]
+    fn a_groups_instant_setting_covers_its_pads_and_later_arrivals() {
+        let mut s = two_groups_three_pads();
+        s.set_group_instant(7, true);
+        assert_eq!(instants(&s), vec![true, false, false]);
+        s.set_pad_group(3, Some(7));
+        assert_eq!((s.pads[2].group, instants(&s)), (Some(7), vec![true, false, true]));
+        s.set_group_instant(7, false);
+        assert_eq!(instants(&s), vec![false, false, false]);
+    }
+
+    #[test]
+    fn a_pad_keeps_its_instant_setting_when_it_leaves_or_joins_a_normal_group() {
+        let mut s = two_groups_three_pads();
+        s.set_group_instant(7, true);
+        s.set_pad_group(1, Some(8));
+        assert_eq!((s.pads[0].group, s.pads[0].instant), (Some(8), true));
+        s.set_pad_group(1, None);
+        assert_eq!((s.pads[0].group, s.pads[0].instant), (None, true));
+    }
+
+    #[test]
+    fn a_group_saved_before_instant_existed_loads_as_normal() {
+        let d = temp_dir("old-group");
+        let p = d.join("settings.json");
+        std::fs::write(&p, r#"{"groups":[{"id":7,"name":"Memes"}]}"#).unwrap();
+        assert_eq!(Settings::load(&p).unwrap().0.groups, vec![Group { id: 7, name: "Memes".into(), instant: false }]);
     }
 }

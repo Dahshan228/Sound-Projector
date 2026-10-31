@@ -301,9 +301,9 @@ impl App {
     }
 
     fn add_pad(&mut self, src: Source, pad_id: PadId) {
-        let mut pad = whole_pad(&src, pad_id);
-        pad.group = self.new_pad_groups.remove(&pad_id).filter(|g| self.s.groups.iter().any(|x| x.id == *g)); // it may have been deleted meanwhile
-        self.s.pads.push(pad);
+        let group = self.new_pad_groups.remove(&pad_id).filter(|g| self.s.groups.iter().any(|x| x.id == *g)); // it may have been deleted meanwhile
+        self.s.pads.push(whole_pad(&src, pad_id));
+        self.s.set_pad_group(pad_id, group);
         self.s.sources.push(src);
     }
 
@@ -714,7 +714,18 @@ impl App {
             .exact_size(210.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("UP NEXT").color(MUTED).size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("UP NEXT").color(MUTED).size(11.0));
+                    if !view.up_next.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Clear").on_hover_text("Empty the queue. What's playing carries on.").clicked() {
+                                for &(entry, _) in &view.up_next {
+                                    let _ = self.tx.send(Cmd::Remove(entry));
+                                }
+                            }
+                        });
+                    }
+                });
                 if view.up_next.is_empty() {
                     ui.label(egui::RichText::new("Press a pad while something's playing and it waits here.").color(MUTED));
                     return;
@@ -855,6 +866,12 @@ impl App {
                         self.group_dialog = Some(GroupDialog { renames: Some(g.id), name: g.name.clone(), pad: None });
                         ui.close();
                     }
+                    let mut instant = g.instant;
+                    if ui.checkbox(&mut instant, "Play instantly").on_hover_text("Every pad in this group cuts in right away, and so do pads added to it later.").changed() {
+                        self.s.set_group_instant(g.id, instant);
+                        self.sync();
+                        ui.close();
+                    }
                     if ui.button("Delete group").clicked() {
                         self.confirm_delete_group = Some(g.clone());
                         ui.close();
@@ -957,10 +974,8 @@ impl App {
                     ui.close();
                 }
                 if let Some(group) = choice {
-                    if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
-                        p.group = group;
-                    }
-                    self.save();
+                    self.s.set_pad_group(id, group);
+                    self.sync();
                     ui.close();
                 }
             });
@@ -1059,7 +1074,7 @@ impl App {
             } else {
                 let id = self.s.new_id();
                 self.set_notice(if dialog.pad.is_some() { format!("Added to '{clean}'.") } else { format!("Made '{clean}'. Right-click a pad to put it in this group.") });
-                self.s.groups.push(Group { id, name: clean });
+                self.s.groups.push(Group { id, name: clean, instant: false });
                 if let Some(p) = self.s.pads.iter_mut().find(|p| Some(p.id) == dialog.pad) {
                     p.group = Some(id);
                 }

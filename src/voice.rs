@@ -89,6 +89,7 @@ impl Voice {
 }
 
 const FADE_FRAMES: u32 = 240; // 5 ms at 48 kHz
+const TICK_LEVEL: f32 = 0.15; // before the "You hear" slider; turn this down if it's too loud in a game
 
 pub struct MicIn {
     pub ring: rtrb::Consumer<f32>,
@@ -98,6 +99,7 @@ pub struct MicIn {
 pub enum OutCmd {
     SetMain(Option<Box<Voice>>),
     SetPreview(Option<Box<Voice>>),
+    Tick(f32), // Hz
 }
 
 pub struct OutputControl {
@@ -160,6 +162,11 @@ pub struct OutputState {
     pause_gain: f32,
     pause_step: f32,
     duck: f32,
+    rate: f32,
+    tick_len: u32,
+    tick_left: u32,
+    tick_phase: f32,
+    tick_step: f32,
     shared: Arc<OutputShared>,
     cmds: rtrb::Consumer<OutCmd>,
     trash: rtrb::Producer<Box<Voice>>,
@@ -196,6 +203,11 @@ impl OutputState {
             pause_gain: 1.0,
             pause_step: 1.0 / (rate as f32 * 0.005),
             duck: 1.0,
+            rate: rate as f32,
+            tick_len: (rate as f32 * 0.060) as u32,
+            tick_left: 0,
+            tick_phase: 0.0,
+            tick_step: 0.0,
             shared: shared.clone(),
             cmds: cmd_rx,
             trash: trash_tx,
@@ -234,6 +246,11 @@ impl OutputState {
                     }
                     self.shared.preview_frames.store(0, Relaxed);
                     self.shared.preview_active.store(self.preview.is_some(), Relaxed);
+                }
+                OutCmd::Tick(hz) => {
+                    self.tick_left = self.tick_len;
+                    self.tick_phase = 0.0;
+                    self.tick_step = std::f32::consts::TAU * hz / self.rate;
                 }
             }
         }
@@ -320,6 +337,20 @@ impl OutputState {
                 let v = self.preview.take().unwrap();
                 self.discard(v);
             }
+        }
+
+        // Made here rather than decoded, so it's instant and can't fail. Rides on the volume slider below.
+        for f in mix.as_chunks_mut::<2>().0 {
+            if self.tick_left == 0 {
+                break;
+            }
+            let left = self.tick_left as f32 / self.tick_len as f32;
+            let attack = ((self.tick_len - self.tick_left) as f32 / (self.rate * 0.002)).min(1.0);
+            let s = self.tick_phase.sin() * TICK_LEVEL * left * left * attack;
+            f[0] += s;
+            f[1] += s;
+            self.tick_phase += self.tick_step;
+            self.tick_left -= 1;
         }
 
         let target = f32::from_bits(self.shared.gain_target.load(Relaxed));
@@ -490,6 +521,30 @@ mod tests {
         run(&mut o, 2, 4800);
         let back = run(&mut o, 2, 480);
         assert!(back.iter().all(|s| (s - 0.5).abs() < 1e-3), "the song comes back");
+    }
+
+    fn tick(hz: f32) -> Vec<f32> {
+        let (mut o, mut ctl, _) = OutputState::new(2, 48_000, None);
+        assert!(ctl.cmds.push(OutCmd::Tick(hz)).is_ok());
+        let mut b = run(&mut o, 2, 9600);
+        b.extend(run(&mut o, 2, 4800)); // long after it's over
+        b
+    }
+
+    #[test]
+    fn tick_is_a_soft_short_blip_without_a_click() {
+        let b = tick(1000.0);
+        let peak = b.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.05 && peak <= TICK_LEVEL + 1e-3, "peak {peak}");
+        assert!(b.windows(2).all(|w| (w[1] - w[0]).abs() < 0.05), "a jump would click");
+        assert!(b[19_200..].iter().all(|s| s.abs() < 1e-6), "still sounding after 200 ms");
+    }
+
+    #[test]
+    fn tick_pitch_follows_what_was_asked_for() {
+        let crossings = |b: &[f32]| b.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        let (low, high) = (crossings(&tick(660.0)), crossings(&tick(1320.0)));
+        assert!(high > low + low / 2, "660 Hz crossed {low} times, 1320 Hz {high}");
     }
 
     #[test]

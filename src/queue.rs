@@ -18,8 +18,10 @@ pub struct Resume {
 /// What the player has to do after a pad press.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Press {
-    /// The queue changed, and what's playing carries on.
-    Nothing,
+    /// It's waiting in the queue now.
+    Queued,
+    /// It was waiting, and now it isn't.
+    Removed,
     /// The pad is at the front of the queue and should start now.
     Start,
     /// The pad is the one playing: stop it, or resume it if it's paused.
@@ -58,10 +60,10 @@ impl Queue {
             return Press::Start;
         }
         if waiting {
-            return Press::Nothing;
+            return Press::Removed;
         }
         self.enqueue(pad);
-        if self.current.is_none() { Press::Start } else { Press::Nothing }
+        if self.current.is_none() { Press::Start } else { Press::Queued }
     }
 
     pub fn advance(&mut self) -> Option<QueueEntry> {
@@ -148,7 +150,7 @@ mod tests {
         let mut q = Queue::default();
         q.press(1, false, None);
         q.advance();
-        assert_eq!(q.press(2, false, None), Press::Nothing);
+        assert_eq!(q.press(2, false, None), Press::Queued);
         assert_eq!(q.current().map(|e| e.pad), Some(1));
         assert_eq!(pads(&q), vec![2]);
     }
@@ -170,7 +172,7 @@ mod tests {
         q.advance();
         q.press(2, false, None);
         q.press(3, false, None);
-        assert_eq!(q.press(2, false, None), Press::Nothing);
+        assert_eq!(q.press(2, false, None), Press::Removed);
         assert_eq!(pads(&q), vec![3]);
     }
 
