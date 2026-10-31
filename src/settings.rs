@@ -33,6 +33,8 @@ pub struct Pad {
     pub boost_db: f32,
     pub hotkey: Option<Hotkey>,
     pub group: Option<u32>,
+    #[serde(default)]
+    pub instant: bool, // cuts in when pressed, instead of queueing
 }
 
 /// A set of pads the user named. A pad is in one group at most.
@@ -177,7 +179,7 @@ mod tests {
         let p = d.join("settings.json");
         let mut s = Settings::default();
         s.groups.push(Group { id: 7, name: "Memes".into() });
-        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7) });
+        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7), instant: true });
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().0, s);
         assert!(!d.join("settings.json.tmp").exists());
@@ -226,12 +228,12 @@ mod tests {
         let p = d.join("settings.json");
         std::fs::write(&p, r#"{"pads":[{"id":1,"source":1,"name":"Drop","start":10,"end":20,"boost_db":6.0,"hotkey":null}]}"#).unwrap();
         let (s, notice) = Settings::load(&p).unwrap();
-        assert_eq!((s.pads.len(), s.pads[0].group, s.groups.len(), notice), (1, None, 0, None));
+        assert_eq!((s.pads.len(), s.pads[0].group, s.pads[0].instant, s.groups.len(), notice), (1, None, false, 0, None));
     }
 
     #[test]
     fn deleting_a_group_keeps_its_pads() {
-        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group };
+        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false };
         let mut s = Settings { pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)], ..Settings::default() };
         s.groups = vec![Group { id: 7, name: "Memes".into() }, Group { id: 8, name: "Songs".into() }];
         s.delete_group(7);

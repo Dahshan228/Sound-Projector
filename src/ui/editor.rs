@@ -1,4 +1,4 @@
-use super::{ACCENT, ACCENT_LIGHT, BORDER, MUTED, TEXT, hotkey_field, semibold};
+use super::{ACCENT, ACCENT_LIGHT, BORDER, MUTED, TEXT, hotkey_field, press_hint, semibold};
 use crate::engine::View;
 use crate::hotkeys::HotkeyAction;
 use crate::library::{clamp_region, fmt_time, frames_to_secs, secs_to_frames};
@@ -25,7 +25,7 @@ pub enum EditorAction {
     /// Play source frames `from..to` to you only.
     Listen { from: u64, to: u64, boost_db: f32 },
     StopPreview,
-    PlayForFriends(PadId),
+    Press(PadId),
     Capture(PadId),
     Delete(PadId),
 }
@@ -82,7 +82,9 @@ impl Editor {
             action = a;
         }
         ui.add_space(6.0);
-        self.chips(ui, s, &src);
+        if let Some(a) = self.chips(ui, s, &src, view) {
+            action = a;
+        }
         ui.add_space(6.0);
         if let Some(a) = self.fields(ui, s, &src, view, failed) {
             action = a;
@@ -170,9 +172,13 @@ impl Editor {
             let reg = Rect::from_x_y_ranges(x_of(anchor.min(current))..=x_of(anchor.max(current)), rect.y_range());
             p.rect(reg, 0.0, ACCENT_LIGHT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT_LIGHT), StrokeKind::Inside);
         }
-        if let (Some(secs), Some((from, ..))) = (view.preview_secs, self.listen) {
-            let f = from + secs_to_frames(secs as f64, src.rate);
-            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(2.0, Color32::WHITE));
+        // Not playing, it stays put and dims: that's where Space picks up.
+        if let Some((from, ..)) = self.listen {
+            let (f, color) = match view.preview_secs {
+                Some(secs) => (from + secs_to_frames(secs as f64, src.rate), Color32::WHITE),
+                None => (from, MUTED),
+            };
+            p.line_segment([Pos2::new(x_of(f), rect.top()), Pos2::new(x_of(f), rect.bottom())], Stroke::new(2.0, color));
         }
         p.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
 
@@ -227,8 +233,8 @@ impl Editor {
                     let (start, end) = clamp_region(anchor, current, src.frames, min_len);
                     let n = s.pads.iter().filter(|p| p.source == src.id && p.name.starts_with("Section")).count() + 1;
                     let id = s.new_id();
-                    let group = s.pads.iter().find(|p| Some(p.id) == self.selected).and_then(|p| p.group);
-                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None, group };
+                    let (group, instant) = s.pads.iter().find(|p| Some(p.id) == self.selected).map_or((None, false), |p| (p.group, p.instant));
+                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None, group, instant };
                     let at = s.pads.iter().rposition(|p| p.source == src.id).map_or(s.pads.len(), |i| i + 1);
                     s.pads.insert(at, pad);
                     self.selected = Some(id);
@@ -263,7 +269,18 @@ impl Editor {
         self.selected = pads.iter().filter(|(_, p)| p.start <= f && f < p.end).min_by_key(|(_, p)| p.end - p.start).map(|(_, p)| p.id);
     }
 
-    fn chips(&mut self, ui: &mut egui::Ui, s: &Settings, src: &Source) {
+    /// Picking a snippet aims Space at it. If you're already listening, it goes straight there.
+    fn pick(&mut self, pad: &Pad, listening: bool) -> Option<EditorAction> {
+        self.selected = Some(pad.id);
+        if listening {
+            return Some(self.listen_range(pad.start, pad.end, pad.boost_db));
+        }
+        self.listen = None;
+        None
+    }
+
+    fn chips(&mut self, ui: &mut egui::Ui, s: &Settings, src: &Source, view: &View) -> Option<EditorAction> {
+        let mut action = None;
         ui.horizontal_wrapped(|ui| {
             for (i, pad) in s.pads.iter().filter(|p| p.source == src.id).enumerate() {
                 let color = COLORS[i % COLORS.len()];
@@ -276,10 +293,11 @@ impl Editor {
                 let r = ui.add(egui::Button::new(egui::RichText::new(text).color(TEXT)).selected(self.selected == Some(pad.id)));
                 ui.painter().circle_filled(r.rect.left_center() + vec2(12.0, 0.0), 4.0, color);
                 if r.clicked() {
-                    self.selected = Some(pad.id);
+                    action = self.pick(pad, view.preview_secs.is_some());
                 }
             }
         });
+        action
     }
 
     fn fields(&mut self, ui: &mut egui::Ui, s: &mut Settings, src: &Source, view: &View, failed: &[HotkeyAction]) -> Option<EditorAction> {
@@ -292,9 +310,10 @@ impl Editor {
         let dur = frames_to_secs(src.frames, src.rate);
         let min_len = secs_to_frames(0.05, src.rate).max(1);
         ui.horizontal(|ui| {
-            let friends = egui::Button::new(egui::RichText::new("▶ Play for friends").color(TEXT)).fill(ACCENT);
-            if ui.add(friends).on_hover_text("Adds this to the queue").clicked() {
-                action = Some(EditorAction::PlayForFriends(pad.id));
+            let (icon, words) = press_hint(view, pad.id, pad.instant);
+            let friends = egui::Button::new(egui::RichText::new(format!("{icon} {words}")).color(TEXT)).fill(ACCENT);
+            if ui.add(friends).clicked() {
+                action = Some(EditorAction::Press(pad.id));
             }
             if view.preview_secs.is_some() {
                 if ui.button("■ Stop preview").clicked() {
@@ -422,6 +441,30 @@ mod tests {
         assert_eq!((resumed, to), (from + 2_000, 100_000)); // 2 s in at 1 kHz
     }
 
+    fn snippet() -> Pad {
+        Pad { id: 3, source: 1, name: "Hook".into(), start: 10_000, end: 20_000, boost_db: 0.0, hotkey: None, group: None, instant: false }
+    }
+
+    #[test]
+    fn space_plays_the_snippet_you_just_picked_not_the_last_one_you_heard() {
+        let (ctx, mut s, mut ed) = setup();
+        step(&ctx, &mut ed, &mut s, 0.0, vec![]);
+        step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(400.0, Y)), press(400.0, true)]);
+        assert!(matches!(step(&ctx, &mut ed, &mut s, 0.15, vec![press(400.0, false)]), EditorAction::Listen { .. }));
+        let hook = snippet();
+        s.pads.push(hook.clone());
+        assert!(ed.pick(&hook, false).is_none()); // nothing's playing, so picking stays quiet
+        let EditorAction::Listen { from, to, .. } = step(&ctx, &mut ed, &mut s, 0.3, vec![space()]) else { panic!("expected Listen") };
+        assert_eq!((from, to), (10_000, 20_000));
+    }
+
+    #[test]
+    fn picking_a_snippet_while_listening_jumps_to_it() {
+        let (_ctx, _s, mut ed) = setup();
+        let Some(EditorAction::Listen { from, to, .. }) = ed.pick(&snippet(), true) else { panic!("expected Listen") };
+        assert_eq!((from, to), (10_000, 20_000));
+    }
+
     #[test]
     fn dragging_across_the_waveform_creates_a_section() {
         let (ctx, mut s, mut ed) = setup();
@@ -446,6 +489,7 @@ mod tests {
     fn a_new_section_joins_the_group_of_the_pad_it_came_from() {
         let (ctx, mut s, mut ed) = setup();
         s.pads[0].group = Some(7);
+        s.pads[0].instant = true;
         ed.select(2);
         step(&ctx, &mut ed, &mut s, 0.0, vec![]);
         step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(200.0, Y)), press(200.0, true)]);
@@ -454,5 +498,6 @@ mod tests {
         }
         step(&ctx, &mut ed, &mut s, 0.5, vec![press(400.0, false)]);
         assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![Some(7), Some(7)]);
+        assert!(s.pads[1].instant);
     }
 }

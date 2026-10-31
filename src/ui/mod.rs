@@ -97,7 +97,7 @@ pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
         .iter()
         .filter_map(|p| {
             let src = s.sources.iter().find(|x| x.id == p.source)?;
-            Some(PadPlay { id: p.id, path: dir.join(&src.file), rate: src.rate, start: p.start, end: p.end, boost_db: p.boost_db })
+            Some(PadPlay { id: p.id, path: dir.join(&src.file), rate: src.rate, start: p.start, end: p.end, boost_db: p.boost_db, instant: p.instant })
         })
         .collect()
 }
@@ -119,6 +119,19 @@ pub fn hotkey_field(ui: &mut egui::Ui, key: Option<Hotkey>, failed: bool) -> egu
     let r = ui.add(egui::Button::new(egui::RichText::new(text).color(color).monospace()));
     let tip = if failed { "Another app is using this key. Click to pick another." } else { "Click to set a key, right-click to clear" };
     r.on_hover_text(tip)
+}
+
+/// What pressing this pad would do right now, as (icon, words), so a button never has to be guessed at.
+fn press_hint(view: &View, pad: PadId, instant: bool) -> (&'static str, &'static str) {
+    if view.current.is_some_and(|c| c.1 == pad) {
+        if view.paused { ("▶", "Resume") } else { ("■", "Stop") }
+    } else if instant || view.current.is_none() {
+        ("▶", "Play for friends")
+    } else if view.up_next.iter().any(|e| e.1 == pad) {
+        ("×", "Remove from queue")
+    } else {
+        ("+", "Add to queue")
+    }
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -201,7 +214,7 @@ impl App {
         let (htx, hctx) = (tx.clone(), cc.egui_ctx.clone());
         let hotkeys = HotkeyService::start(move |a| {
             let _ = htx.send(match a {
-                HotkeyAction::Pad(id) => Cmd::Enqueue(id),
+                HotkeyAction::Pad(id) => Cmd::Press(id),
                 HotkeyAction::Pause => Cmd::TogglePause,
                 HotkeyAction::Skip => Cmd::Skip,
                 HotkeyAction::Stop => Cmd::Stop,
@@ -648,16 +661,17 @@ impl App {
             let playing = view.current.is_some();
             ui.horizontal(|ui| {
                 let title = match view.current {
-                    Some((_, pad)) => egui::RichText::new(format!("▶  {}", self.pad_name(pad))).font(semibold(14.0)),
+                    Some((_, pad)) => egui::RichText::new(format!("{}  {}", if view.paused { "⏸" } else { "▶" }, self.pad_name(pad))).font(semibold(14.0)),
+                    None if view.preview_secs.is_some() => egui::RichText::new("Previewing: only you hear it").color(MUTED),
                     None => egui::RichText::new("Nothing playing").color(MUTED),
                 };
                 ui.label(title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(playing, |ui| {
-                        if ui.button("■ Stop").clicked() {
+                        if ui.button("■ Stop").on_hover_text("Stop, and clear the queue").clicked() {
                             let _ = self.tx.send(Cmd::Stop);
                         }
-                        if ui.button("⏭ Skip").clicked() {
+                        if ui.button("⏭ Skip").on_hover_text("Play the next one in the queue").clicked() {
                             let _ = self.tx.send(Cmd::Skip);
                         }
                         let pause = if view.paused { "▶ Resume" } else { "⏸ Pause" };
@@ -668,6 +682,9 @@ impl App {
                 });
             });
             ui.horizontal(|ui| {
+                if !playing {
+                    self.seek_drag = None; // it ended mid-drag
+                }
                 let frac = self.seek_drag.unwrap_or(if view.dur_secs > 0.0 { view.pos_secs / view.dur_secs } else { 0.0 });
                 let shown = if self.seek_drag.is_some() { frac * view.dur_secs } else { view.pos_secs };
                 ui.label(egui::RichText::new(fmt_time(shown as f64)).color(MUTED).monospace());
@@ -699,11 +716,11 @@ impl App {
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("UP NEXT").color(MUTED).size(11.0));
                 if view.up_next.is_empty() {
-                    ui.label(egui::RichText::new("Press ▶ on a pad, or its hotkey, to queue it.").color(MUTED));
+                    ui.label(egui::RichText::new("Press a pad while something's playing and it waits here.").color(MUTED));
                     return;
                 }
                 let mut rows: Vec<Rect> = Vec::new();
-                let mut remove = None;
+                let (mut remove, mut play_now) = (None, None);
                 let (_, dropped) = ui.dnd_drop_zone::<u64, ()>(egui::Frame::NONE, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for &(entry, pad) in &view.up_next {
@@ -718,6 +735,9 @@ impl App {
                                         if ui.small_button("×").on_hover_text("Remove from queue").clicked() {
                                             remove = Some(entry);
                                         }
+                                        if ui.small_button("▶").on_hover_text("Play now").clicked() {
+                                            play_now = Some(entry);
+                                        }
                                     });
                                 });
                             });
@@ -727,6 +747,10 @@ impl App {
                 });
                 if let Some(e) = remove {
                     let _ = self.tx.send(Cmd::Remove(e));
+                }
+                if let Some(e) = play_now {
+                    let _ = self.tx.send(Cmd::Move(e, 0));
+                    let _ = self.tx.send(Cmd::Skip);
                 }
                 if let (Some(entry), Some(p)) = (dropped, ui.ctx().pointer_interact_pos()) {
                     let from = view.up_next.iter().position(|(e, _)| *e == *entry).unwrap_or(0);
@@ -756,14 +780,13 @@ impl App {
             }
             Some(editor::EditorAction::Listen { from, to, boost_db }) => {
                 if let Some(src) = self.editor.as_ref().and_then(|e| self.s.sources.iter().find(|s| s.id == e.source)) {
-                    let p = PadPlay { id: 0, path: sounds_dir().join(&src.file), rate: src.rate, start: from, end: to, boost_db };
+                    let p = PadPlay { id: 0, path: sounds_dir().join(&src.file), rate: src.rate, start: from, end: to, boost_db, instant: false };
                     let _ = self.tx.send(Cmd::Preview(p));
                 }
             }
-            Some(editor::EditorAction::PlayForFriends(id)) => {
+            Some(editor::EditorAction::Press(id)) => {
                 self.sync(); // a snippet marked a moment ago isn't saved yet
-                let _ = self.tx.send(Cmd::StopPreview);
-                let _ = self.tx.send(Cmd::Enqueue(id));
+                let _ = self.tx.send(Cmd::Press(id));
             }
             Some(editor::EditorAction::StopPreview) => {
                 let _ = self.tx.send(Cmd::StopPreview);
@@ -851,8 +874,9 @@ impl App {
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Open {}", pad.name)));
         // Added after the tile, so it sits on top and takes its own clicks.
         let play = Rect::from_center_size(rect.right_top() + vec2(-22.0, 22.0), vec2(26.0, 26.0));
-        let pr = ui.interact(play, Id::unique(("play", id)), Sense::click()).on_hover_text("Play for friends");
-        pr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Play {} for friends", pad.name)));
+        let (icon, words) = press_hint(view, id, pad.instant);
+        let pr = ui.interact(play, Id::unique(("play", id)), Sense::click()).on_hover_text(words);
+        pr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{words}: {}", pad.name)));
         let playing = view.current.map(|c| c.1) == Some(id);
         let stroke = if playing {
             Stroke::new(1.5, ACCENT_LIGHT)
@@ -868,10 +892,13 @@ impl App {
         job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width() - 26.0);
         p.galley(inner.left_top(), p.layout_job(job), TEXT);
         p.circle_filled(play.center(), 12.0, if pr.hovered() { ACCENT_LIGHT } else { ACCENT });
-        p.text(play.center() + vec2(1.0, 0.0), Align2::CENTER_CENTER, "▶", FontId::proportional(11.0), Color32::WHITE);
+        p.text(play.center() + vec2(if icon == "▶" { 1.0 } else { 0.0 }, 0.0), Align2::CENTER_CENTER, icon, FontId::proportional(if matches!(icon, "+" | "×") { 17.0 } else { 11.0 }), Color32::WHITE);
 
         let secs = src.as_ref().map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
         let mut meta = if src.as_ref().is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
+        if pad.instant {
+            meta.insert_str(0, "Instant · ");
+        }
         if let Some(q) = view.up_next.iter().position(|(_, p)| *p == id) {
             meta.push_str(&format!(" · #{} in queue", q + 1));
         }
@@ -893,7 +920,7 @@ impl App {
         p.galley(inner.left_bottom() - vec2(0.0, g.size().y), g, MUTED);
 
         if pr.clicked() {
-            let _ = self.tx.send(Cmd::Enqueue(id));
+            let _ = self.tx.send(Cmd::Press(id));
         } else if r.clicked()
             && let Some(src) = &src
         {
@@ -937,6 +964,14 @@ impl App {
                     ui.close();
                 }
             });
+            let mut instant = pad.instant;
+            if ui.checkbox(&mut instant, "Play instantly").on_hover_text("Cuts in right away instead of queueing. What was playing carries on afterwards.").changed() {
+                if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
+                    p.instant = instant;
+                }
+                self.sync();
+                ui.close();
+            }
             if ui.button("Replace audio from YouTube…").clicked() {
                 self.youtube_dialog = Some(YoutubeDialog { replaces: Some(pad.source), ..Default::default() });
                 ui.close();
@@ -1166,6 +1201,33 @@ impl eframe::App for App {
         self.dialogs(&ctx);
         if view.current.is_some() || view.preview_secs.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pads_button_says_what_pressing_it_will_do() {
+        let idle = View::default();
+        let playing = View { current: Some((1, 7)), up_next: vec![(2, 8)], ..View::default() };
+        let paused = View { paused: true, ..playing.clone() };
+        for (view, pad, instant, want) in [
+            (&idle, 7, false, "Play for friends"),
+            (&idle, 7, true, "Play for friends"),
+            (&playing, 7, false, "Stop"),
+            (&playing, 7, true, "Stop"),
+            (&paused, 7, false, "Resume"),
+            (&playing, 8, false, "Remove from queue"),
+            (&playing, 9, false, "Add to queue"),
+            (&playing, 8, true, "Play for friends"),
+            (&playing, 9, true, "Play for friends"),
+            (&paused, 9, false, "Add to queue"),
+            (&paused, 9, true, "Play for friends"),
+        ] {
+            assert_eq!(press_hint(view, pad, instant).1, want, "pad {pad}, instant {instant}, paused {}", view.paused);
         }
     }
 }

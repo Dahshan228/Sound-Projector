@@ -1,7 +1,7 @@
 use crate::decode::spawn_stream;
 use crate::dsp::{DriftResampler, db_to_gain, slider_to_gain};
 use crate::library::{frames_to_secs, out_frames};
-use crate::queue::{Queue, QueueEntry};
+use crate::queue::{Press, Queue, QueueEntry, Resume};
 use crate::settings::PadId;
 use crate::voice::{MicIn, OutCmd, OutputControl, OutputShared, OutputState, Voice};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -20,6 +20,7 @@ pub struct PadPlay {
     pub start: u64,
     pub end: u64,
     pub boost_db: f32,
+    pub instant: bool,
 }
 
 impl PadPlay {
@@ -48,7 +49,7 @@ pub struct DeviceChoice {
 }
 
 pub enum Cmd {
-    Enqueue(PadId),
+    Press(PadId),
     Skip,
     Stop,
     TogglePause,
@@ -174,6 +175,8 @@ fn fatal(e: &cpal::Error) -> bool {
 
 pub const CABLE: &str = "CABLE Input";
 const RETRY: Duration = Duration::from_secs(2);
+/// A second press of the same pad this soon is a double-click or a bouncing key, not "stop it".
+const DOUBLE_PRESS: Duration = Duration::from_millis(300);
 
 struct Out {
     _stream: cpal::Stream,
@@ -204,6 +207,7 @@ struct Controller {
     jobs: Sender<(PadPlay, u32)>,
     done: Receiver<(PadPlay, u32, Result<Vec<f32>, String>)>,
     last_src_pos: u64,
+    last_press: Option<(PadId, Instant)>,
     last_retry: Instant,
     view: Arc<Mutex<View>>,
     on_change: Box<dyn Fn() + Send>,
@@ -239,6 +243,7 @@ impl Controller {
             jobs,
             done,
             last_src_pos: 0,
+            last_press: None,
             last_retry: Instant::now(),
             view,
             on_change,
@@ -294,12 +299,12 @@ impl Controller {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Enqueue(pad) => {
-                if self.pads.contains_key(&pad) {
-                    self.queue.enqueue(pad);
-                    if self.queue.current().is_none() {
-                        self.advance();
-                    }
+            Cmd::Press(pad) => {
+                let now = Instant::now();
+                let bounced = self.last_press.is_some_and(|(p, at)| p == pad && now - at < DOUBLE_PRESS);
+                self.last_press = Some((pad, now));
+                if !bounced {
+                    self.press(pad);
                 }
             }
             Cmd::Skip => self.advance(),
@@ -333,11 +338,7 @@ impl Controller {
                     }
                 }
             }
-            Cmd::StopPreview => {
-                if let Some(you) = self.you.as_mut() {
-                    you.send(OutCmd::SetPreview(None));
-                }
-            }
+            Cmd::StopPreview => self.stop_preview(),
             Cmd::SetVolumes(v) => {
                 self.volumes = v;
                 self.apply_volumes();
@@ -352,6 +353,28 @@ impl Controller {
                 self.open_you();
                 self.resume_current();
             }
+        }
+    }
+
+    fn press(&mut self, pad: PadId) {
+        let Some(instant) = self.pads.get(&pad).map(|p| p.instant) else { return };
+        // A sound you cut off with an instant pad comes back, unless it was an instant pad itself.
+        let keeps = self.queue.current().is_some_and(|e| self.pads.get(&e.pad).is_some_and(|p| !p.instant));
+        let hold = keeps.then_some(Resume { at: self.last_src_pos, paused: self.paused });
+        match self.queue.press(pad, instant, hold) {
+            Press::Nothing => {}
+            Press::Toggle if self.paused => self.set_paused(false),
+            Press::Toggle => self.advance(),
+            Press::Start => {
+                self.stop_preview(); // so you hear what you just pressed
+                self.advance();
+            }
+        }
+    }
+
+    fn stop_preview(&mut self) {
+        if let Some(you) = self.you.as_mut() {
+            you.send(OutCmd::SetPreview(None));
         }
     }
 
@@ -388,7 +411,9 @@ impl Controller {
                     return;
                 }
                 Some(e) => {
-                    if self.start_entry(e, None) {
+                    if self.start_entry(e, e.resume.map(|r| r.at)) {
+                        // The next one plays, unless it's a paused song an instant pad cut in on.
+                        self.set_paused(e.resume.is_some_and(|r| r.paused));
                         return;
                     }
                 }
@@ -399,6 +424,7 @@ impl Controller {
     /// Start `e` on every open output, from the top (with preroll) or from source frame `at`.
     fn start_entry(&mut self, e: QueueEntry, at: Option<u64>) -> bool {
         let Some(p) = self.pads.get(&e.pad).cloned() else { return false };
+        let at = at.map(|a| a.clamp(p.start, p.end)); // it may have been trimmed since it was paused or cut off
         self.last_src_pos = at.unwrap_or(p.start);
         let prerolls = &self.prerolls;
         let mut err = None;
@@ -731,10 +757,10 @@ mod tests {
         let e = Engine::start(
             DeviceChoice::default(),
             Volumes { friends: 0.8, you: 0.0, boost_db: 0.0 },
-            vec![PadPlay { id: 1, path: p, rate: 48_000, start: 0, end: 48_000, boost_db: 0.0 }],
+            vec![PadPlay { id: 1, path: p, rate: 48_000, start: 0, end: 48_000, boost_db: 0.0, instant: false }],
             Box::new(|| {}),
         );
-        e.sender().send(Cmd::Enqueue(1)).unwrap();
+        e.sender().send(Cmd::Press(1)).unwrap();
         let wait = |f: &dyn Fn(&View) -> bool| {
             let t = std::time::Instant::now();
             while !f(&e.view()) {
@@ -744,5 +770,91 @@ mod tests {
         };
         wait(&|v| v.current.is_some());
         wait(&|v| v.current.is_none());
+    }
+
+    #[test]
+    #[ignore] // needs real audio hardware: cargo test press_rules -- --ignored
+    fn press_rules_on_real_outputs() {
+        let dir = crate::testutil::temp_dir("press-rules");
+        let tone = |name: &str, frames: i32| {
+            let p = dir.join(name);
+            let s: Vec<i16> = (0..frames).map(|i| (3000.0 * (i as f32 * 0.0577).sin()) as i16).collect();
+            crate::testutil::write_wav(&p, 48_000, 1, &s);
+            p
+        };
+        let pad = |id, path: PathBuf, end, instant| PadPlay { id, path, rate: 48_000, start: 0, end, boost_db: 0.0, instant };
+        let (song, other, meme) = (1, 2, 3);
+        // Both sliders at 0, so nothing reaches Discord or your headphones.
+        let e = Engine::start(
+            DeviceChoice::default(),
+            Volumes { friends: 0.0, you: 0.0, boost_db: 0.0 },
+            vec![
+                pad(song, tone("song.wav", 480_000), 480_000, false),
+                pad(other, tone("other.wav", 480_000), 480_000, false),
+                pad(meme, tone("meme.wav", 14_400), 14_400, true),
+            ],
+            Box::new(|| {}),
+        );
+        let tx = e.sender();
+        let press = |p| tx.send(Cmd::Press(p)).unwrap();
+        let settle = || std::thread::sleep(DOUBLE_PRESS + Duration::from_millis(50));
+        let wait = |what: &str, f: &dyn Fn(&View) -> bool| {
+            let t = Instant::now();
+            while !f(&e.view()) {
+                assert!(t.elapsed().as_secs() < 4, "{what}: {:?} paused={} pos={}", e.view().current, e.view().paused, e.view().pos_secs);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let on = |v: &View, p| v.current.map(|c| c.1) == Some(p);
+
+        press(song);
+        press(song); // a double-click is one press, not start-then-stop
+        wait("a double-click starts it and it keeps playing", &|v| on(v, song) && v.pos_secs > 0.3);
+        settle();
+
+        press(other);
+        wait("another pad waits", &|v| v.up_next.iter().any(|q| q.1 == other));
+        settle();
+        press(other);
+        wait("pressing a waiting pad takes it back", &|v| v.up_next.is_empty());
+        assert!(on(&e.view(), song));
+
+        let before = e.view().pos_secs;
+        press(meme);
+        wait("an instant pad cuts in", &|v| on(v, meme));
+        wait("the song comes back", &|v| on(v, song));
+        wait("from where it was", &|v| v.pos_secs >= before);
+        assert!(e.view().pos_secs < before + 1.0, "resumed at {} after {before}", e.view().pos_secs);
+
+        tx.send(Cmd::TogglePause).unwrap();
+        wait("paused", &|v| v.paused);
+        press(meme);
+        wait("an instant pad plays through a pause", &|v| on(v, meme) && !v.paused);
+        wait("the paused song comes back still paused", &|v| on(v, song) && v.paused);
+        settle();
+        press(song);
+        wait("pressing the paused pad resumes it", &|v| on(v, song) && !v.paused);
+
+        press(other);
+        tx.send(Cmd::TogglePause).unwrap();
+        wait("paused with one waiting", &|v| v.paused && !v.up_next.is_empty());
+        tx.send(Cmd::Skip).unwrap();
+        wait("skip starts the next one playing", &|v| on(v, other) && !v.paused);
+        settle();
+
+        press(other);
+        wait("pressing what's playing stops it", &|v| v.current.is_none() && !v.paused);
+
+        tx.send(Cmd::Preview(pad(0, tone("preview.wav", 480_000), 480_000, false))).unwrap();
+        wait("preview runs", &|v| v.preview_secs.is_some());
+        settle();
+        press(song);
+        wait("a pad that starts takes over from a preview", &|v| on(v, song) && v.preview_secs.is_none());
+        tx.send(Cmd::Preview(pad(0, dir.join("preview.wav"), 480_000, false))).unwrap();
+        wait("preview runs over the song", &|v| v.preview_secs.is_some());
+        press(other);
+        wait("queued", &|v| !v.up_next.is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(e.view().preview_secs.is_some(), "queueing something must leave the preview alone");
     }
 }
