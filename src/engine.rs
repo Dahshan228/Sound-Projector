@@ -177,6 +177,8 @@ pub const CABLE: &str = "CABLE Input";
 const RETRY: Duration = Duration::from_secs(2);
 /// A second press of the same pad this soon is a double-click or a bouncing key, not "stop it".
 const DOUBLE_PRESS: Duration = Duration::from_millis(300);
+const TICK_QUEUED: f32 = 1320.0; // higher: it went in
+const TICK_REMOVED: f32 = 660.0; // lower: it came out
 
 struct Out {
     _stream: cpal::Stream,
@@ -362,13 +364,22 @@ impl Controller {
         let keeps = self.queue.current().is_some_and(|e| self.pads.get(&e.pad).is_some_and(|p| !p.instant));
         let hold = keeps.then_some(Resume { at: self.last_src_pos, paused: self.paused });
         match self.queue.press(pad, instant, hold) {
-            Press::Nothing => {}
+            // Nothing you'd hear changes, and in a game you can't see the window, so you get a tick instead.
+            Press::Queued => self.tick(TICK_QUEUED),
+            Press::Removed => self.tick(TICK_REMOVED),
             Press::Toggle if self.paused => self.set_paused(false),
             Press::Toggle => self.advance(),
             Press::Start => {
                 self.stop_preview(); // so you hear what you just pressed
                 self.advance();
             }
+        }
+    }
+
+    /// Your headphones only: friends never hear it.
+    fn tick(&mut self, hz: f32) {
+        if let Some(you) = self.you.as_mut() {
+            you.send(OutCmd::Tick(hz));
         }
     }
 
@@ -493,6 +504,8 @@ impl Controller {
         }
         if current_gone {
             self.advance();
+        } else if self.queue.current().is_some_and(|e| changed.iter().any(|p| p.id == e.pad)) {
+            self.resume_current(); // trimmed while playing: carry on, but with the new edges
         }
         for rate in self.rates() {
             for p in &changed {
@@ -770,6 +783,29 @@ mod tests {
         };
         wait(&|v| v.current.is_some());
         wait(&|v| v.current.is_none());
+    }
+
+    #[test]
+    #[ignore] // needs real audio hardware: cargo test trimming -- --ignored
+    fn trimming_the_playing_pad_applies_right_away() {
+        let p = crate::testutil::temp_dir("trim").join("song.wav");
+        let s: Vec<i16> = (0..480_000).map(|i| (3000.0 * (i as f32 * 0.0577).sin()) as i16).collect();
+        crate::testutil::write_wav(&p, 48_000, 1, &s);
+        let pad = |end| PadPlay { id: 1, path: p.clone(), rate: 48_000, start: 0, end, boost_db: 0.0, instant: false };
+        let e = Engine::start(DeviceChoice::default(), Volumes { friends: 0.0, you: 0.0, boost_db: 0.0 }, vec![pad(480_000)], Box::new(|| {}));
+        let wait = |what: &str, f: &dyn Fn(&View) -> bool| {
+            let t = Instant::now();
+            while !f(&e.view()) {
+                assert!(t.elapsed().as_secs() < 4, "{what}: pos {} of {}", e.view().pos_secs, e.view().dur_secs);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        e.sender().send(Cmd::Press(1)).unwrap();
+        wait("playing", &|v| v.current.is_some() && v.pos_secs > 0.3);
+        e.sender().send(Cmd::SetPads(vec![pad(72_000)])).unwrap();
+        wait("the bar shows the new length", &|v| (v.dur_secs - 1.5).abs() < 0.01);
+        assert!(e.view().pos_secs > 0.25, "it should carry on, not restart: {}", e.view().pos_secs);
+        wait("it ends at the new end, not the old one", &|v| v.current.is_none());
     }
 
     #[test]
