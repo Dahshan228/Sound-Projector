@@ -5,6 +5,25 @@ use std::collections::VecDeque;
 pub struct QueueEntry {
     pub id: u64,
     pub pad: PadId,
+    pub resume: Option<Resume>,
+}
+
+/// Where an entry left off when an instant pad cut in, in source frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Resume {
+    pub at: u64,
+    pub paused: bool,
+}
+
+/// What the player has to do after a pad press.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Press {
+    /// The queue changed, and what's playing carries on.
+    Nothing,
+    /// The pad is at the front of the queue and should start now.
+    Start,
+    /// The pad is the one playing: stop it, or resume it if it's paused.
+    Toggle,
 }
 
 /// What's playing and what's next. Entry ids start at 1 and are never reused.
@@ -18,8 +37,31 @@ pub struct Queue {
 impl Queue {
     pub fn enqueue(&mut self, pad: PadId) -> u64 {
         self.next_id += 1;
-        self.up_next.push_back(QueueEntry { id: self.next_id, pad });
+        self.up_next.push_back(QueueEntry { id: self.next_id, pad, resume: None });
         self.next_id
+    }
+
+    /// The one rule for a pad press, from the hotkey or a button. `hold` is what an instant pad should
+    /// bring the playing entry back to afterwards; without it that entry is dropped.
+    pub fn press(&mut self, pad: PadId, instant: bool, hold: Option<Resume>) -> Press {
+        if self.current.is_some_and(|e| e.pad == pad) {
+            return Press::Toggle;
+        }
+        let waiting = self.up_next.iter().any(|e| e.pad == pad);
+        self.up_next.retain(|e| e.pad != pad);
+        if instant {
+            if let Some(e) = self.current.filter(|_| hold.is_some()) {
+                self.up_next.push_front(QueueEntry { resume: hold, ..e });
+            }
+            let id = self.enqueue(pad);
+            self.move_entry(id, 0);
+            return Press::Start;
+        }
+        if waiting {
+            return Press::Nothing;
+        }
+        self.enqueue(pad);
+        if self.current.is_none() { Press::Start } else { Press::Nothing }
     }
 
     pub fn advance(&mut self) -> Option<QueueEntry> {
@@ -92,6 +134,89 @@ mod tests {
         q.stop();
         assert!(q.current().is_none() && q.up_next().is_empty());
         assert!(q.advance().is_none());
+    }
+
+    #[test]
+    fn pressing_a_pad_when_nothing_is_on_starts_it() {
+        let mut q = Queue::default();
+        assert_eq!(q.press(1, false, None), Press::Start);
+        assert_eq!(q.advance().map(|e| e.pad), Some(1));
+    }
+
+    #[test]
+    fn pressing_a_pad_while_another_plays_queues_it() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        q.advance();
+        assert_eq!(q.press(2, false, None), Press::Nothing);
+        assert_eq!(q.current().map(|e| e.pad), Some(1));
+        assert_eq!(pads(&q), vec![2]);
+    }
+
+    #[test]
+    fn pressing_the_pad_thats_on_toggles_it_and_queues_nothing() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        q.advance();
+        assert_eq!(q.press(1, false, None), Press::Toggle);
+        assert_eq!(q.press(1, true, None), Press::Toggle);
+        assert!(q.up_next().is_empty());
+    }
+
+    #[test]
+    fn pressing_a_waiting_pad_takes_it_back_out() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        q.advance();
+        q.press(2, false, None);
+        q.press(3, false, None);
+        assert_eq!(q.press(2, false, None), Press::Nothing);
+        assert_eq!(pads(&q), vec![3]);
+    }
+
+    #[test]
+    fn an_instant_pad_cuts_in_and_the_song_carries_on_where_it_was() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        let song = q.advance().unwrap();
+        q.press(2, false, None);
+        let held = Resume { at: 500, paused: false };
+        assert_eq!(q.press(9, true, Some(held)), Press::Start);
+        assert_eq!(q.advance().map(|e| e.pad), Some(9));
+        assert_eq!(pads(&q), vec![1, 2]); // the song is next, ahead of what was already waiting
+        assert_eq!(q.advance(), Some(QueueEntry { resume: Some(held), ..song }));
+    }
+
+    #[test]
+    fn an_instant_pad_with_nothing_on_just_starts() {
+        let mut q = Queue::default();
+        assert_eq!(q.press(9, true, None), Press::Start);
+        assert_eq!(q.advance().map(|e| e.pad), Some(9));
+        assert!(q.up_next().is_empty());
+    }
+
+    #[test]
+    fn a_second_instant_pad_replaces_the_first() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        q.advance();
+        q.press(8, true, Some(Resume { at: 500, paused: false }));
+        q.advance();
+        assert_eq!(q.press(9, true, None), Press::Start); // no hold: an instant pad isn't worth coming back to
+        assert_eq!(q.advance().map(|e| e.pad), Some(9));
+        assert_eq!(pads(&q), vec![1]);
+    }
+
+    #[test]
+    fn an_instant_pad_already_waiting_moves_up_instead_of_playing_twice() {
+        let mut q = Queue::default();
+        q.press(1, false, None);
+        q.advance();
+        q.press(9, false, None);
+        q.press(2, false, None);
+        assert_eq!(q.press(9, true, None), Press::Start);
+        assert_eq!(q.advance().map(|e| e.pad), Some(9));
+        assert_eq!(pads(&q), vec![2]);
     }
 
     #[test]

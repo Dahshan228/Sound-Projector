@@ -159,6 +159,7 @@ pub struct OutputState {
     gain_step: f32,
     pause_gain: f32,
     pause_step: f32,
+    duck: f32,
     shared: Arc<OutputShared>,
     cmds: rtrb::Consumer<OutCmd>,
     trash: rtrb::Producer<Box<Voice>>,
@@ -194,6 +195,7 @@ impl OutputState {
             gain_step: 1.0 / (rate as f32 * 0.010),
             pause_gain: 1.0,
             pause_step: 1.0 / (rate as f32 * 0.005),
+            duck: 1.0,
             shared: shared.clone(),
             cmds: cmd_rx,
             trash: trash_tx,
@@ -297,6 +299,14 @@ impl OutputState {
                 let v = self.fading.take().unwrap();
                 self.discard(v);
             }
+        }
+
+        // While you preview, what friends hear drops out of your ears. Their output never has a preview.
+        let duck_target = if self.preview.is_some() { 0.0 } else { 1.0 };
+        for f in mix.as_chunks_mut::<2>().0 {
+            self.duck += (duck_target - self.duck).clamp(-self.pause_step, self.pause_step);
+            f[0] *= self.duck;
+            f[1] *= self.duck;
         }
 
         if let Some(v) = self.preview.as_mut() {
@@ -462,6 +472,24 @@ mod tests {
         sh.set_paused(false); // what Cmd::Stop does, along with SetMain(None)
         assert!(ctl.cmds.push(OutCmd::SetMain(None)).is_ok());
         assert!(run(&mut o, 2, 4800).iter().all(|s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn preview_takes_over_your_ears_while_the_song_keeps_going() {
+        let (mut o, mut ctl, sh) = OutputState::new(2, 48_000, None);
+        set_main(&mut ctl, Voice::new(1, 0, 48_000, pre(vec![0.5; 96_000]), None, 1.0, false));
+        run(&mut o, 2, 4800); // past the voice's own (unfaded) start
+        let at = sh.main_frames();
+        assert!(ctl.cmds.push(OutCmd::SetPreview(Some(Box::new(Voice::new(0, 0, 48_000, pre(vec![0.1; 96_000]), None, 1.0, true))))).is_ok());
+        let ramp = run(&mut o, 2, 4800);
+        assert!(ramp.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01)); // no click on the way down
+        let b = run(&mut o, 2, 480);
+        assert!(b.iter().all(|s| (s - 0.1).abs() < 1e-3), "only the preview is left");
+        assert_eq!(sh.main_frames(), at + 5280); // friends' song didn't stop for it
+        assert!(ctl.cmds.push(OutCmd::SetPreview(None)).is_ok());
+        run(&mut o, 2, 4800);
+        let back = run(&mut o, 2, 480);
+        assert!(back.iter().all(|s| (s - 0.5).abs() < 1e-3), "the song comes back");
     }
 
     #[test]
