@@ -1041,7 +1041,7 @@ impl App {
                     let _ = self.youtube_tx.send(crate::youtube::Work::Connect);
                     self.youtube_connecting = true;
                 }
-                ui.label(egui::RichText::new("Only connect if you have Premium. It's for Premium-only songs and Premium's better audio. You sign in with Microsoft Edge, and the sign-in stays on this PC. Using an account with download tools may break YouTube's terms and could get it flagged.").color(MUTED));
+                ui.label(egui::RichText::new("Only connect if you have Premium. It's for Premium-only songs and Premium's better audio. You sign in with Microsoft Edge, and the sign-in stays on this PC. It's a full Google sign-in, so only connect on a PC you trust. Using an account with download tools may break YouTube's terms and could get it flagged.").color(MUTED));
             }
             ui.separator();
             ui.horizontal(|ui| {

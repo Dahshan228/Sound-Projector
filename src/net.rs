@@ -30,7 +30,7 @@ pub fn run(cmd: &mut Command) -> Result<String, String> {
 
 fn curl() -> Command {
     let mut c = system_tool("curl.exe");
-    c.args(["-sSfL", "--connect-timeout", "20", "--speed-time", "60", "--speed-limit", "1024"]);
+    c.args(["-sSfL", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "20", "--speed-time", "60", "--speed-limit", "1024"]);
     c
 }
 
@@ -54,6 +54,12 @@ pub fn sha256(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_to_fetch_over_plain_http() {
+        let err = fetch_text("http://127.0.0.1:9/").unwrap_err();
+        assert!(err.to_lowercase().contains("protocol"), "{err}");
+    }
 
     #[test]
     fn hashes_a_file() {
