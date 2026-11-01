@@ -53,6 +53,8 @@ Filename: "{app}\Sound Projector.exe"; Description: "Open Sound Projector"; Flag
 [UninstallDelete]
 ; The YouTube tools can be downloaded again. The library and settings next to them stay.
 Type: filesandordirs; Name: "{userappdata}\SoundProjector\tools"
+; A YouTube sign-in shouldn't outlive the app.
+Type: filesandordirs; Name: "{userappdata}\SoundProjector\youtube-signin"
 
 [Code]
 var

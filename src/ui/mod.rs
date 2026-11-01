@@ -79,8 +79,10 @@ pub struct App {
     update_error_rx: Receiver<String>,
     youtube_dialog: Option<YoutubeDialog>,
     youtube_status: Option<String>,
-    youtube_tx: Sender<crate::youtube::Job>,
+    youtube_tx: Sender<crate::youtube::Work>,
     youtube_rx: Receiver<crate::youtube::Event>,
+    youtube_connected: bool,
+    youtube_connecting: bool,
     group_view: Option<u32>, // None shows every pad
     group_dialog: Option<GroupDialog>,
     confirm_delete_group: Option<Group>,
@@ -257,6 +259,8 @@ impl App {
             youtube_status: None,
             youtube_tx,
             youtube_rx,
+            youtube_connected: crate::youtube::connected(&crate::youtube::sign_in_dir()),
+            youtube_connecting: false,
             group_view: None,
             group_dialog: None,
             confirm_delete_group: None,
@@ -342,6 +346,12 @@ impl App {
         while let Ok(event) = self.youtube_rx.try_recv() {
             match event {
                 crate::youtube::Event::Status(s) => self.youtube_status = Some(s),
+                crate::youtube::Event::Account(connected, message) => {
+                    self.youtube_status = None;
+                    self.youtube_connected = connected;
+                    self.youtube_connecting = false;
+                    self.set_notice(message);
+                }
                 crate::youtube::Event::Added(pad_id, src) => {
                     self.youtube_status = None;
                     self.set_notice(format!("Added '{}' from YouTube.", src.name));
@@ -1015,6 +1025,25 @@ impl App {
                 ui.label(egui::RichText::new("Use the same version of the song, so its clips stay in the right places. Clips and hotkeys are kept.").color(MUTED));
             }
             ui.label(egui::RichText::new("Saved losslessly from YouTube's best audio. Only add videos you own or have permission to use.").color(MUTED));
+            ui.separator();
+            if self.youtube_connecting {
+                ui.label(egui::RichText::new("Sign in to YouTube in the Edge window, then close that window.").color(MUTED));
+            } else if self.youtube_connected {
+                ui.horizontal(|ui| {
+                    ui.label("Connected to your YouTube account.");
+                    if ui.button("Disconnect").clicked() {
+                        let _ = self.youtube_tx.send(crate::youtube::Work::Disconnect);
+                        self.youtube_connected = false;
+                    }
+                });
+            } else {
+                if ui.button("Connect YouTube account").clicked() {
+                    let _ = self.youtube_tx.send(crate::youtube::Work::Connect);
+                    self.youtube_connecting = true;
+                }
+                ui.label(egui::RichText::new("For Premium-only songs. You sign in with Microsoft Edge, and the sign-in stays on this PC. Using an account with download tools may break YouTube's terms and could get it flagged.").color(MUTED));
+            }
+            ui.separator();
             ui.horizontal(|ui| {
                 submit = ui.button(if dialog.replaces.is_some() { "Replace" } else { "Add" }).clicked() || enter;
                 // The field has no right-click menu, so this is the way to paste with the mouse.
@@ -1030,7 +1059,7 @@ impl App {
             match crate::youtube::video_url(&dialog.link) {
                 Ok(url) => {
                     let job = crate::youtube::Job { url, source_id: self.s.new_id(), pad_id: self.new_pad_id(), replaces: dialog.replaces };
-                    let _ = self.youtube_tx.send(job);
+                    let _ = self.youtube_tx.send(crate::youtube::Work::Download(job));
                     self.youtube_status = Some("Getting ready to download from YouTube…".into());
                     keep = false;
                 }
