@@ -14,6 +14,7 @@ const DENO: &str = "https://github.com/denoland/deno/releases/latest/download/de
 const BEST_AUDIO: &str = "bestaudio/best";
 const CONNECTED: &str = "connected"; // written to the sign-in folder once a sign-in is confirmed
 const SIGN_IN: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
+const SIGN_OUT: &str = "https://accounts.google.com/Logout";
 
 pub struct Job {
     pub url: String,
@@ -127,6 +128,31 @@ fn edge_exe() -> Result<PathBuf, String> {
         .ok_or_else(|| "signing in needs Microsoft Edge, which isn't installed.".to_string())
 }
 
+/// The folder holds a full Google session, so it drops whatever access it would inherit: only this user and Windows itself.
+fn lock_down(dir: &Path) -> Result<(), String> {
+    let user = std::env::var("USERNAME").map_err(|e| e.to_string())?;
+    run(system_tool("icacls.exe").arg(dir).args(["/inheritance:r", "/grant:r"]).arg(format!("{user}:(OI)(CI)F")).arg("*S-1-5-18:(OI)(CI)F")).map(drop)
+}
+
+fn sign_out_args(dir: &Path) -> Vec<String> {
+    let flags = ["--headless=new", "--disable-sync", "--disable-features=msImplicitSignin", "--virtual-time-budget=8000", "--dump-dom"];
+    flags.into_iter().map(String::from).chain([format!("--user-data-dir={}", dir.display()), SIGN_OUT.into()]).collect()
+}
+
+/// Deleting the files only removes this PC's copy, so first ask Google to end the session. False if that couldn't run.
+fn sign_out(dir: &Path) -> bool {
+    let Ok(edge) = edge_exe() else { return false };
+    let Ok(mut child) = hidden(edge).args(sign_out_args(dir)).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false };
+    for _ in 0..40 {
+        if let Ok(Some(done)) = child.try_wait() {
+            return done.success();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let _ = child.kill();
+    false
+}
+
 fn edge_args(dir: &Path) -> Vec<String> {
     // Without the last two, Edge signs this profile in to the Windows work or school account and offers to sync it.
     let flags = ["--no-first-run", "--no-default-browser-check", "--disable-sync", "--disable-features=msImplicitSignin"];
@@ -135,7 +161,7 @@ fn edge_args(dir: &Path) -> Vec<String> {
 
 fn yt_dlp(tools: &Path) -> Command {
     let mut c = hidden(tools.join("yt-dlp.exe"));
-    c.arg("--ignore-config").arg("--js-runtimes").arg(format!("deno:{}", tools.join("deno").join("deno.exe").display()));
+    c.args(["--ignore-config", "--no-plugin-dirs"]).arg("--js-runtimes").arg(format!("deno:{}", tools.join("deno").join("deno.exe").display()));
     c
 }
 
@@ -143,6 +169,7 @@ fn yt_dlp(tools: &Path) -> Command {
 fn connect(dir: &Path, tools: &Path, status: &mut dyn FnMut(String)) -> Result<(), String> {
     let edge = edge_exe()?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    lock_down(dir)?;
     status("Sign in to YouTube in the Edge window, then close that window.".into());
     Command::new(edge).args(edge_args(dir)).status().map_err(|e| e.to_string())?;
     status("Checking your sign-in…".into());
@@ -249,6 +276,9 @@ pub fn start(ctx: egui::Context) -> (Sender<Work>, Receiver<Event>) {
         let tools = app_dir().join("tools");
         let sign_in = sign_in_dir();
         clear_unfinished(&sign_in);
+        if connected(&sign_in) {
+            let _ = lock_down(&sign_in); // a sign-in from before this was added, or one whose folder changed
+        }
         let mut updated = false;
         for work in job_rx {
             let mut status = |s: String| {
@@ -256,13 +286,14 @@ pub fn start(ctx: egui::Context) -> (Sender<Work>, Receiver<Event>) {
                 ctx.request_repaint();
             };
             let event = match work {
-                Work::Disconnect => Event::Account(
-                    false,
-                    match disconnect(&sign_in) {
-                        Ok(()) => "Disconnected. Your YouTube sign-in was removed from this PC.".into(),
-                        Err(_) => "Disconnected. Some sign-in files were in use, so they'll be removed the next time the app starts.".into(),
-                    },
-                ),
+                Work::Disconnect => {
+                    status("Signing out of YouTube…".into());
+                    let asked_google = sign_out(&sign_in);
+                    let removed = disconnect(&sign_in).is_ok();
+                    let local = if removed { "Your sign-in was removed from this PC." } else { "Some sign-in files were in use, so they'll be removed the next time the app starts." };
+                    let google = if asked_google { "Google was asked to end the session." } else { "Google couldn't be reached, so end the session at myaccount.google.com/device-activity." };
+                    Event::Account(false, format!("Disconnected. {local} {google}"))
+                }
                 Work::Connect => match ready_tools(&tools, &mut updated, &mut status).and_then(|()| connect(&sign_in, &tools, &mut status)) {
                     Ok(()) => Event::Account(true, "Connected to your YouTube account.".into()),
                     Err(e) => {
@@ -292,7 +323,7 @@ pub fn start(ctx: egui::Context) -> (Sender<Work>, Receiver<Event>) {
 fn ready_tools(tools: &Path, updated: &mut bool, status: &mut dyn FnMut(String)) -> Result<(), String> {
     ensure_tools(tools, status)?;
     if !std::mem::replace(updated, true) {
-        let _ = run(hidden(tools.join("yt-dlp.exe")).arg("--update"));
+        let _ = run(yt_dlp(tools).arg("--update"));
     }
     Ok(())
 }
@@ -391,6 +422,34 @@ mod tests {
     #[test]
     fn cookies_come_from_the_apps_own_profile() {
         assert_eq!(cookies_arg(Path::new(r"C:\data\youtube-signin")), r"edge:C:\data\youtube-signin\Default");
+    }
+
+    #[test]
+    fn sign_in_folder_is_only_for_this_user() {
+        let dir = crate::testutil::temp_dir("yt-lock").join("signin");
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        std::fs::write(dir.join("Default").join("Cookies"), "session").unwrap();
+        lock_down(&dir).unwrap();
+        let acl = run(system_tool("icacls.exe").arg(&dir).arg("/T")).unwrap();
+        assert!(acl.contains(&std::env::var("USERNAME").unwrap()), "{acl}");
+        assert!(!acl.contains("Administrators") && !acl.contains("Users:"), "{acl}");
+        assert_eq!(std::fs::read_to_string(dir.join("Default").join("Cookies")).unwrap(), "session");
+        lock_down(&dir).unwrap(); // every start does this again
+    }
+
+    #[test]
+    fn disconnecting_asks_google_to_end_the_session_invisibly() {
+        let args = sign_out_args(Path::new(r"C:\data\youtube-signin"));
+        assert!(args.contains(&"--headless=new".to_string()));
+        assert!(args.contains(&r"--user-data-dir=C:\data\youtube-signin".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("https://accounts.google.com/Logout"));
+    }
+
+    #[test]
+    fn tools_ignore_plugins_and_config_left_on_the_pc() {
+        let cmd = yt_dlp(Path::new(r"C:\tools"));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.contains(&"--ignore-config".to_string()) && args.contains(&"--no-plugin-dirs".to_string()), "{args:?}");
     }
 
     #[test]
