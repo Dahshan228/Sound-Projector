@@ -11,6 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 const YT_DLP: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 const FFMPEG: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl-shared.zip";
 const DENO: &str = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+const BEST_AUDIO: &str = "bestaudio/best";
 const CONNECTED: &str = "connected"; // written to the sign-in folder once a sign-in is confirmed
 const SIGN_IN: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
 
@@ -92,14 +93,18 @@ fn sign_in_error(check: Result<String, String>) -> Result<(), String> {
     }
 }
 
-/// Premium-only songs live on YouTube Music.
-// ponytail: Premium's 256 kbps audio still doesn't come through, because yt-dlp skips web_music's streams without a PO token. A token provider plugin would be the upgrade.
+/// Premium-only songs and Premium's better audio live on YouTube Music.
 fn account_url(url: &str) -> String {
     url.replacen("https://www.youtube.com", "https://music.youtube.com", 1)
 }
 
 fn cookies_arg(dir: &Path) -> String {
     format!("edge:{}", dir.join("Default").display())
+}
+
+/// yt-dlp hides streams it thinks need a PO token, including Premium's 257 kbps audio, which downloads fine with a Premium account. An account without Premium still gets a normal stream.
+fn account_args(dir: &Path) -> Vec<String> {
+    vec!["--cookies-from-browser".into(), cookies_arg(dir), "--extractor-args".into(), "youtube:formats=missing_pot".into()]
 }
 
 fn explain(error: String, connected: bool) -> String {
@@ -184,7 +189,7 @@ fn fetch_audio(url: &str, tools: &Path, job_dir: &Path, account: Option<&Path>, 
     let mut cmd = yt_dlp(tools);
     let url = match account {
         Some(dir) => {
-            cmd.arg("--cookies-from-browser").arg(cookies_arg(dir));
+            cmd.args(account_args(dir));
             account_url(url)
         }
         None => url.to_string(),
@@ -194,7 +199,7 @@ fn fetch_audio(url: &str, tools: &Path, job_dir: &Path, account: Option<&Path>, 
         .args(["--progress-template", "download:%(progress._percent_str)s"])
         .arg("--ffmpeg-location")
         .arg(tools.join("ffmpeg"))
-        .args(["--format", "bestaudio/best", "--extract-audio", "--audio-format", "flac"])
+        .args(["--format", BEST_AUDIO, "--extract-audio", "--audio-format", "flac"])
         .arg("--paths")
         .arg(job_dir)
         .args(["--output", "%(title).120s.%(ext)s", "--", &url])
@@ -386,6 +391,30 @@ mod tests {
     #[test]
     fn cookies_come_from_the_apps_own_profile() {
         assert_eq!(cookies_arg(Path::new(r"C:\data\youtube-signin")), r"edge:C:\data\youtube-signin\Default");
+    }
+
+    #[test]
+    fn account_downloads_can_see_premium_streams() {
+        let args = account_args(Path::new(r"C:\data\youtube-signin"));
+        assert_eq!(args[..2], ["--cookies-from-browser".to_string(), r"edge:C:\data\youtube-signin\Default".to_string()]);
+        // Without this, yt-dlp hides the 257 kbps streams because it has no PO token.
+        assert_eq!(args[2..], ["--extractor-args".to_string(), "youtube:formats=missing_pot".to_string()]);
+    }
+
+    #[test]
+    #[ignore] // needs a connected Premium account: cargo test premium_audio_end_to_end -- --ignored --nocapture
+    fn premium_audio_end_to_end() {
+        let (tools, sign_in) = (app_dir().join("tools"), sign_in_dir());
+        assert!(connected(&sign_in), "connect a Premium account in the app first");
+        let url = account_url(WATCH);
+        let chosen = run(yt_dlp(&tools).args(account_args(&sign_in)).args(["--simulate", "--print", "format_id", "--format", BEST_AUDIO, "--", &url])).unwrap();
+        assert_eq!(chosen.trim(), "774", "the 257 kbps Opus stream");
+
+        let job_dir = crate::testutil::temp_dir("yt-premium");
+        let file = fetch_audio(WATCH, &tools, &job_dir, Some(&sign_in), &mut |s| println!("{s}")).unwrap();
+        let src = import(&file, &crate::testutil::temp_dir("yt-premium-lib"), 1).unwrap();
+        println!("{src:?}");
+        assert!(src.file.ends_with(".flac") && src.frames > 0);
     }
 
     #[test]
