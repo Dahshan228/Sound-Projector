@@ -1,14 +1,14 @@
-use super::{CaptureTarget, ERROR, MUTED, hotkey_field, semibold};
+use super::{CONTROLS, ERROR, MUTED, hotkey_field, key_of, semibold, set_key};
 use crate::engine::View;
 use crate::hotkeys::HotkeyAction;
-use crate::settings::{Hotkey, Settings};
+use crate::settings::Settings;
 use eframe::egui;
 
 pub enum SettingsAction {
     None,
     Changed,
     DevicesChanged,
-    Capture(CaptureTarget),
+    Capture(HotkeyAction),
     AutostartChanged,
 }
 
@@ -37,6 +37,9 @@ pub fn show(
         .resizable(false)
         .vscroll(true)
         .default_width(440.0)
+        // egui's default 420 cut off the last hotkeys and Start with Windows, and it keeps the height it first
+        // opened at; a minimum lifts that too (a short app window still caps it).
+        .min_height(480.0)
         .pivot(egui::Align2::CENTER_TOP)
         .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 40.0))
         .show(ctx, |ui| {
@@ -88,21 +91,19 @@ pub fn show(
 
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Control hotkeys").font(semibold(14.0)));
-        egui::Grid::new("control-keys").num_columns(2).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
-            let rows: [(&str, CaptureTarget, HotkeyAction, &mut Option<Hotkey>); 3] = [
-                ("Pause/Resume", CaptureTarget::Pause, HotkeyAction::Pause, &mut s.pause_key),
-                ("Skip", CaptureTarget::Skip, HotkeyAction::Skip, &mut s.skip_key),
-                ("Stop", CaptureTarget::Stop, HotkeyAction::Stop, &mut s.stop_key),
-            ];
-            for (label, target, act, key) in rows {
-                ui.label(egui::RichText::new(label).color(MUTED));
-                let r = hotkey_field(ui, *key, failed.contains(&act));
-                if r.clicked() {
-                    action = SettingsAction::Capture(target);
-                }
-                if r.secondary_clicked() {
-                    *key = None;
-                    action = SettingsAction::Changed;
+        // Two to a row, so all of them fit without scrolling.
+        egui::Grid::new("control-keys").num_columns(4).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
+            for row in CONTROLS.chunks(2) {
+                for &(act, label) in row {
+                    ui.label(egui::RichText::new(label).color(MUTED));
+                    let r = hotkey_field(ui, key_of(s, act), failed.contains(&act));
+                    if r.clicked() {
+                        action = SettingsAction::Capture(act);
+                    }
+                    if r.secondary_clicked() {
+                        set_key(s, act, None);
+                        action = SettingsAction::Changed;
+                    }
                 }
                 ui.end_row();
             }

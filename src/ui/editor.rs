@@ -233,8 +233,8 @@ impl Editor {
                     let (start, end) = clamp_region(anchor, current, src.frames, min_len);
                     let n = s.pads.iter().filter(|p| p.source == src.id && p.name.starts_with("Section")).count() + 1;
                     let id = s.new_id();
-                    let (group, instant) = s.pads.iter().find(|p| Some(p.id) == self.selected).map_or((None, false), |p| (p.group, p.instant));
-                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None, group, instant };
+                    let (group, instant, looping) = s.pads.iter().find(|p| Some(p.id) == self.selected).map_or((None, false, false), |p| (p.group, p.instant, p.looping));
+                    let pad = Pad { id, source: src.id, name: format!("Section {n}"), start, end, boost_db: 0.0, hotkey: None, group, instant, looping };
                     let at = s.pads.iter().rposition(|p| p.source == src.id).map_or(s.pads.len(), |i| i + 1);
                     s.pads.insert(at, pad);
                     self.selected = Some(id);
@@ -442,7 +442,7 @@ mod tests {
     }
 
     fn snippet() -> Pad {
-        Pad { id: 3, source: 1, name: "Hook".into(), start: 10_000, end: 20_000, boost_db: 0.0, hotkey: None, group: None, instant: false }
+        Pad { id: 3, source: 1, name: "Hook".into(), start: 10_000, end: 20_000, boost_db: 0.0, hotkey: None, group: None, instant: false, looping: false }
     }
 
     #[test]
@@ -490,6 +490,7 @@ mod tests {
         let (ctx, mut s, mut ed) = setup();
         s.pads[0].group = Some(7);
         s.pads[0].instant = true;
+        s.pads[0].looping = true;
         ed.select(2);
         step(&ctx, &mut ed, &mut s, 0.0, vec![]);
         step(&ctx, &mut ed, &mut s, 0.1, vec![Event::PointerMoved(Pos2::new(200.0, Y)), press(200.0, true)]);
@@ -498,6 +499,6 @@ mod tests {
         }
         step(&ctx, &mut ed, &mut s, 0.5, vec![press(400.0, false)]);
         assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![Some(7), Some(7)]);
-        assert!(s.pads[1].instant);
+        assert!(s.pads[1].instant && s.pads[1].looping);
     }
 }

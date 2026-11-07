@@ -35,6 +35,8 @@ pub struct Pad {
     pub group: Option<u32>,
     #[serde(default)]
     pub instant: bool, // cuts in when pressed, instead of queueing
+    #[serde(default)]
+    pub looping: bool, // starts over each time it ends
 }
 
 /// A set of pads the user named. A pad is in one group at most.
@@ -44,6 +46,8 @@ pub struct Group {
     pub name: String,
     #[serde(default)]
     pub instant: bool, // pads that join get `Pad::instant`
+    #[serde(default)]
+    pub looping: bool, // and `Pad::looping`
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -62,6 +66,11 @@ pub struct Settings {
     pub pause_key: Option<Hotkey>,
     pub skip_key: Option<Hotkey>,
     pub stop_key: Option<Hotkey>,
+    pub fade_key: Option<Hotkey>,
+    pub loop_key: Option<Hotkey>,
+    pub restart_key: Option<Hotkey>,
+    pub back_key: Option<Hotkey>,
+    pub forward_key: Option<Hotkey>,
     pub start_with_windows: bool,
 }
 
@@ -81,6 +90,11 @@ impl Default for Settings {
             pause_key: None,
             skip_key: None,
             stop_key: None,
+            fade_key: None,
+            loop_key: None,
+            restart_key: None,
+            back_key: None,
+            forward_key: None,
             start_with_windows: false,
         }
     }
@@ -154,12 +168,22 @@ impl Settings {
         }
     }
 
-    /// Joining an instant group makes a pad instant. Moving never turns it off.
+    pub fn set_group_loop(&mut self, id: u32, on: bool) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
+            g.looping = on;
+        }
+        for p in self.pads.iter_mut().filter(|p| p.group == Some(id)) {
+            p.looping = on;
+        }
+    }
+
+    /// Joining an instant or looping group makes a pad instant or looping. Moving never turns either off.
     pub fn set_pad_group(&mut self, pad: PadId, group: Option<u32>) {
-        let joins_instant = self.groups.iter().any(|g| Some(g.id) == group && g.instant);
+        let (instant, looping) = self.groups.iter().find(|g| Some(g.id) == group).map_or((false, false), |g| (g.instant, g.looping));
         if let Some(p) = self.pads.iter_mut().find(|p| p.id == pad) {
             p.group = group;
-            p.instant |= joins_instant;
+            p.instant |= instant;
+            p.looping |= looping;
         }
     }
 }
@@ -199,8 +223,8 @@ mod tests {
         let d = temp_dir("roundtrip");
         let p = d.join("settings.json");
         let mut s = Settings::default();
-        s.groups.push(Group { id: 7, name: "Memes".into(), instant: true });
-        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7), instant: true });
+        s.groups.push(Group { id: 7, name: "Memes".into(), instant: true, looping: false });
+        s.pads.push(Pad { id: 1, source: 1, name: "Drop".into(), start: 10, end: 20, boost_db: 6.0, hotkey: Some(Hotkey { mods: 2, vk: 0x61 }), group: Some(7), instant: true, looping: false });
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().0, s);
         assert!(!d.join("settings.json.tmp").exists());
@@ -249,24 +273,24 @@ mod tests {
         let p = d.join("settings.json");
         std::fs::write(&p, r#"{"pads":[{"id":1,"source":1,"name":"Drop","start":10,"end":20,"boost_db":6.0,"hotkey":null}]}"#).unwrap();
         let (s, notice) = Settings::load(&p).unwrap();
-        assert_eq!((s.pads.len(), s.pads[0].group, s.pads[0].instant, s.groups.len(), notice), (1, None, false, 0, None));
+        assert_eq!((s.pads.len(), s.pads[0].group, s.pads[0].instant, s.pads[0].looping, s.groups.len(), notice), (1, None, false, false, 0, None));
     }
 
     #[test]
     fn deleting_a_group_keeps_its_pads() {
-        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false };
+        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false, looping: false };
         let mut s = Settings { pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)], ..Settings::default() };
-        s.groups = vec![Group { id: 7, name: "Memes".into(), instant: false }, Group { id: 8, name: "Songs".into(), instant: false }];
+        s.groups = vec![Group { id: 7, name: "Memes".into(), instant: false, looping: false }, Group { id: 8, name: "Songs".into(), instant: false, looping: false }];
         s.delete_group(7);
-        assert_eq!(s.groups, vec![Group { id: 8, name: "Songs".into(), instant: false }]);
+        assert_eq!(s.groups, vec![Group { id: 8, name: "Songs".into(), instant: false, looping: false }]);
         assert_eq!(s.pads.iter().map(|p| p.group).collect::<Vec<_>>(), vec![None, Some(8), None]);
     }
 
     fn two_groups_three_pads() -> Settings {
-        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false };
+        let pad = |id, group| Pad { id, source: 1, name: "Drop".into(), start: 0, end: 1, boost_db: 0.0, hotkey: None, group, instant: false, looping: false };
         Settings {
             pads: vec![pad(1, Some(7)), pad(2, Some(8)), pad(3, None)],
-            groups: vec![Group { id: 7, name: "Memes".into(), instant: false }, Group { id: 8, name: "Songs".into(), instant: false }],
+            groups: vec![Group { id: 7, name: "Memes".into(), instant: false, looping: false }, Group { id: 8, name: "Songs".into(), instant: false, looping: false }],
             ..Settings::default()
         }
     }
@@ -286,6 +310,21 @@ mod tests {
     }
 
     #[test]
+    fn a_groups_loop_setting_covers_its_pads_and_later_arrivals() {
+        let mut s = two_groups_three_pads();
+        let loops = |s: &Settings| s.pads.iter().map(|p| p.looping).collect::<Vec<_>>();
+        s.set_group_loop(7, true);
+        assert_eq!(loops(&s), vec![true, false, false]);
+        s.set_pad_group(3, Some(7));
+        assert_eq!(loops(&s), vec![true, false, true]);
+        assert_eq!(instants(&s), vec![false, false, false], "looping isn't playing instantly");
+        s.set_pad_group(1, None);
+        assert!(s.pads[0].looping, "leaving keeps it, like Play instantly");
+        s.set_group_loop(7, false);
+        assert_eq!(loops(&s), vec![true, false, false]);
+    }
+
+    #[test]
     fn a_pad_keeps_its_instant_setting_when_it_leaves_or_joins_a_normal_group() {
         let mut s = two_groups_three_pads();
         s.set_group_instant(7, true);
@@ -300,6 +339,6 @@ mod tests {
         let d = temp_dir("old-group");
         let p = d.join("settings.json");
         std::fs::write(&p, r#"{"groups":[{"id":7,"name":"Memes"}]}"#).unwrap();
-        assert_eq!(Settings::load(&p).unwrap().0.groups, vec![Group { id: 7, name: "Memes".into(), instant: false }]);
+        assert_eq!(Settings::load(&p).unwrap().0.groups, vec![Group { id: 7, name: "Memes".into(), instant: false, looping: false }]);
     }
 }

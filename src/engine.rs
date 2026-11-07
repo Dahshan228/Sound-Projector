@@ -21,6 +21,7 @@ pub struct PadPlay {
     pub end: u64,
     pub boost_db: f32,
     pub instant: bool,
+    pub looping: bool,
 }
 
 impl PadPlay {
@@ -54,6 +55,8 @@ pub enum Cmd {
     Stop,
     TogglePause,
     Seek(f32),
+    SeekBy(f32), // seconds, back or forward
+    FadeOut,
     Remove(u64),
     Move(u64, usize),
     Preview(PadPlay),
@@ -179,6 +182,7 @@ const RETRY: Duration = Duration::from_secs(2);
 const DOUBLE_PRESS: Duration = Duration::from_millis(300);
 const TICK_QUEUED: f32 = 1320.0; // higher: it went in
 const TICK_REMOVED: f32 = 660.0; // lower: it came out
+const FADE_OUT_SECS: f32 = 2.0;
 
 struct Out {
     _stream: cpal::Stream,
@@ -209,6 +213,7 @@ struct Controller {
     jobs: Sender<(PadPlay, u32)>,
     done: Receiver<(PadPlay, u32, Result<Vec<f32>, String>)>,
     last_src_pos: u64,
+    faded: Option<u64>, // the entry fading out: it ends for good, even if it loops
     last_press: Option<(PadId, Instant)>,
     last_retry: Instant,
     view: Arc<Mutex<View>>,
@@ -245,6 +250,7 @@ impl Controller {
             jobs,
             done,
             last_src_pos: 0,
+            faded: None,
             last_press: None,
             last_retry: Instant::now(),
             view,
@@ -279,8 +285,8 @@ impl Controller {
             if let Some(o) = self.secondary() {
                 o.shared.take_finished();
             }
-            if finished.is_some() && finished == self.queue.current().map(|e| e.id) {
-                self.advance();
+            if let Some(e) = self.queue.current().filter(|e| finished == Some(e.id)) {
+                self.ended(e);
             }
             if self.last_retry.elapsed() >= RETRY {
                 self.last_retry = Instant::now();
@@ -327,6 +333,24 @@ impl Controller {
                         self.start_entry(e, Some(at));
                     }
             }
+            Cmd::SeekBy(secs) => {
+                if let Some(e) = self.queue.current()
+                    && let Some(p) = self.pads.get(&e.pad) {
+                        let at = self.last_src_pos as f64 + secs as f64 * p.rate as f64;
+                        self.start_entry(e, Some(at.max(0.0) as u64)); // past its end, it ends
+                    }
+            }
+            Cmd::FadeOut => match self.queue.current() {
+                Some(_) if self.paused => self.advance(), // nothing to hear fade
+                Some(e) => {
+                    self.faded = Some(e.id);
+                    for out in [&mut self.friends, &mut self.you].into_iter().flatten() {
+                        let frames = (out.rate as f32 * FADE_OUT_SECS) as u64;
+                        out.send(OutCmd::FadeOut(frames));
+                    }
+                }
+                None => {}
+            },
             Cmd::Remove(id) => {
                 self.queue.remove(id);
             }
@@ -360,8 +384,8 @@ impl Controller {
 
     fn press(&mut self, pad: PadId) {
         let Some(instant) = self.pads.get(&pad).map(|p| p.instant) else { return };
-        // A sound you cut off with an instant pad comes back, unless it was an instant pad itself.
-        let keeps = self.queue.current().is_some_and(|e| self.pads.get(&e.pad).is_some_and(|p| !p.instant));
+        // A sound you cut off with an instant pad comes back, unless it was an instant pad itself or fading out.
+        let keeps = self.queue.current().is_some_and(|e| self.faded != Some(e.id) && self.pads.get(&e.pad).is_some_and(|p| !p.instant));
         let hold = keeps.then_some(Resume { at: self.last_src_pos, paused: self.paused });
         match self.queue.press(pad, instant, hold) {
             // Nothing you'd hear changes, and in a game you can't see the window, so you get a tick instead.
@@ -412,6 +436,15 @@ impl Controller {
         (self.on_change)();
     }
 
+    /// A looping pad starts over; anything else makes way for the next one.
+    // ponytail: the restart waits on this loop's poll and one device buffer, so a pass has a ~10-20 ms gap; gapless needs the mixer to queue the next pass itself
+    fn ended(&mut self, e: QueueEntry) {
+        let again = self.faded != Some(e.id) && self.pads.get(&e.pad).is_some_and(|p| p.looping);
+        if !(again && self.start_entry(e, None)) {
+            self.advance();
+        }
+    }
+
     /// Move to the next entry, skipping any that can't start. Empty queue → silence.
     fn advance(&mut self) {
         loop {
@@ -437,6 +470,7 @@ impl Controller {
         let Some(p) = self.pads.get(&e.pad).cloned() else { return false };
         let at = at.map(|a| a.clamp(p.start, p.end)); // it may have been trimmed since it was paused or cut off
         self.last_src_pos = at.unwrap_or(p.start);
+        self.faded = None; // a fresh start is at full volume
         let prerolls = &self.prerolls;
         let mut err = None;
         let make = |rate: u32| -> Result<Option<Box<Voice>>, String> {
@@ -497,6 +531,13 @@ impl Controller {
         let removed: Vec<PadId> = self.pads.keys().filter(|id| !new.contains_key(id)).copied().collect();
         let changed: Vec<PadPlay> =
             new.values().filter(|p| self.pads.get(&p.id).is_none_or(|o| !o.same_region(p))).cloned().collect();
+        // Loop turned on or off for what's playing: from a game you can't see the window, so you hear it.
+        let looping = |pads: &HashMap<PadId, PadPlay>, e: QueueEntry| pads.get(&e.pad).map(|p| p.looping);
+        if let Some(e) = self.queue.current()
+            && let (Some(was), Some(now)) = (looping(&self.pads, e), looping(&new, e))
+            && was != now {
+                self.tick(if now { TICK_QUEUED } else { TICK_REMOVED });
+            }
         self.pads = new;
         let mut current_gone = false;
         for id in removed {
@@ -770,7 +811,7 @@ mod tests {
         let e = Engine::start(
             DeviceChoice::default(),
             Volumes { friends: 0.8, you: 0.0, boost_db: 0.0 },
-            vec![PadPlay { id: 1, path: p, rate: 48_000, start: 0, end: 48_000, boost_db: 0.0, instant: false }],
+            vec![PadPlay { id: 1, path: p, rate: 48_000, start: 0, end: 48_000, boost_db: 0.0, instant: false, looping: false }],
             Box::new(|| {}),
         );
         e.sender().send(Cmd::Press(1)).unwrap();
@@ -791,7 +832,7 @@ mod tests {
         let p = crate::testutil::temp_dir("trim").join("song.wav");
         let s: Vec<i16> = (0..480_000).map(|i| (3000.0 * (i as f32 * 0.0577).sin()) as i16).collect();
         crate::testutil::write_wav(&p, 48_000, 1, &s);
-        let pad = |end| PadPlay { id: 1, path: p.clone(), rate: 48_000, start: 0, end, boost_db: 0.0, instant: false };
+        let pad = |end| PadPlay { id: 1, path: p.clone(), rate: 48_000, start: 0, end, boost_db: 0.0, instant: false, looping: false };
         let e = Engine::start(DeviceChoice::default(), Volumes { friends: 0.0, you: 0.0, boost_db: 0.0 }, vec![pad(480_000)], Box::new(|| {}));
         let wait = |what: &str, f: &dyn Fn(&View) -> bool| {
             let t = Instant::now();
@@ -818,7 +859,7 @@ mod tests {
             crate::testutil::write_wav(&p, 48_000, 1, &s);
             p
         };
-        let pad = |id, path: PathBuf, end, instant| PadPlay { id, path, rate: 48_000, start: 0, end, boost_db: 0.0, instant };
+        let pad = |id, path: PathBuf, end, instant| PadPlay { id, path, rate: 48_000, start: 0, end, boost_db: 0.0, instant, looping: false };
         let (song, other, meme) = (1, 2, 3);
         // Both sliders at 0, so nothing reaches Discord or your headphones.
         let e = Engine::start(
@@ -892,5 +933,84 @@ mod tests {
         wait("queued", &|v| !v.up_next.is_empty());
         std::thread::sleep(Duration::from_millis(100));
         assert!(e.view().preview_secs.is_some(), "queueing something must leave the preview alone");
+    }
+
+    #[test]
+    #[ignore] // needs real audio hardware: cargo test advanced_controls -- --ignored
+    fn advanced_controls_on_real_outputs() {
+        let dir = crate::testutil::temp_dir("advanced-controls");
+        let tone = |name: &str, frames: i32| {
+            let p = dir.join(name);
+            let s: Vec<i16> = (0..frames).map(|i| (3000.0 * (i as f32 * 0.0577).sin()) as i16).collect();
+            crate::testutil::write_wav(&p, 48_000, 1, &s);
+            p
+        };
+        let pad = |id, path: PathBuf, end, looping| PadPlay { id, path, rate: 48_000, start: 0, end, boost_db: 0.0, instant: false, looping };
+        let (riff, song, next) = (1, 2, 3);
+        let e = Engine::start(
+            DeviceChoice::default(),
+            Volumes { friends: 0.0, you: 0.0, boost_db: 0.0 },
+            vec![
+                pad(riff, tone("riff.wav", 19_200), 19_200, true), // 0.4 s
+                pad(song, tone("song.wav", 480_000), 480_000, false),
+                pad(next, tone("next.wav", 480_000), 480_000, false),
+            ],
+            Box::new(|| {}),
+        );
+        let tx = e.sender();
+        let send = |c| tx.send(c).unwrap();
+        let settle = || std::thread::sleep(DOUBLE_PRESS + Duration::from_millis(50));
+        let wait = |what: &str, f: &dyn Fn(&View) -> bool| {
+            let t = Instant::now();
+            while !f(&e.view()) {
+                assert!(t.elapsed().as_secs() < 4, "{what}: {:?} pos={}", e.view().current, e.view().pos_secs);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let on = |v: &View, p| v.current.map(|c| c.1) == Some(p);
+
+        send(Cmd::Press(riff));
+        wait("it plays", &|v| on(v, riff) && v.pos_secs > 0.25);
+        wait("and starts over instead of ending", &|v| on(v, riff) && v.pos_secs < 0.1);
+        wait("again", &|v| on(v, riff) && v.pos_secs > 0.25);
+        settle();
+        send(Cmd::Press(next));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(on(&e.view(), riff), "a pad you press meanwhile waits");
+        send(Cmd::Press(riff));
+        wait("pressing a looping pad ends it, and the next one plays", &|v| on(v, next));
+        send(Cmd::Stop);
+        wait("stopped", &|v| v.current.is_none());
+
+        send(Cmd::Press(song));
+        wait("song", &|v| on(v, song) && v.pos_secs > 0.2);
+        send(Cmd::SeekBy(5.0));
+        wait("forward", &|v| v.pos_secs > 5.0);
+        assert!(e.view().pos_secs < 6.0, "{}", e.view().pos_secs);
+        send(Cmd::SeekBy(-3.0));
+        wait("back", &|v| v.pos_secs > 2.0 && v.pos_secs < 3.0);
+        send(Cmd::SeekBy(-60.0));
+        wait("not before its start", &|v| on(v, song) && v.pos_secs < 0.5);
+        send(Cmd::SeekBy(60.0));
+        wait("past its end, the queue moves on", &|v| v.current.is_none());
+
+        settle(); // all that took less than a double-click
+        send(Cmd::Press(song));
+        wait("song again", &|v| on(v, song) && v.pos_secs > 0.2);
+        settle();
+        send(Cmd::Press(next));
+        let t = Instant::now();
+        send(Cmd::FadeOut);
+        wait("a fade-out ends it, and the next one plays", &|v| on(v, next));
+        let took = t.elapsed().as_secs_f32();
+        assert!((1.8..3.0).contains(&took), "fade took {took} s");
+        send(Cmd::Stop);
+
+        send(Cmd::Press(riff));
+        wait("riff", &|v| on(v, riff));
+        send(Cmd::FadeOut);
+        wait("a looping pad that fades out stays ended", &|v| v.current.is_none());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(e.view().current.is_none());
     }
 }
