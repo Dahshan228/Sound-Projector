@@ -17,6 +17,11 @@ pub enum HotkeyAction {
     Pause,
     Skip,
     Stop,
+    FadeOut,
+    Loop,
+    Restart,
+    Back,
+    Forward,
 }
 
 /// System-wide hotkeys via RegisterHotKey on a thread with its own message loop, so they keep

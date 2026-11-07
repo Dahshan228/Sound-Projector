@@ -32,9 +32,11 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
 - **Upgrade a song:** right-click its pad, choose **Replace audio from YouTube…**, and paste a link to the same version of the song. All of that song's clips, hotkeys and boosts are kept. A video with a different length is refused, because the clips wouldn't line up.
 - **Play:** click a pad's button or press its hotkey. One item plays at a time, so if something else is playing, the pad waits in the queue. Press the same pad again to undo it: it stops if it's playing, resumes if it's paused, and leaves the queue if it's waiting. The button always shows what a press will do. When a press only changes the queue, you hear a soft tick in your headphones: higher when a pad goes in, lower when it comes out. Friends don't hear it, and it follows the **You hear** slider. In **Up Next**, ▶ on an item plays it now, and **Clear** empties the queue without stopping what's playing.
 - **Instant pads:** right-click a pad and turn on **Play instantly** for sounds that can't wait, like memes. It cuts in right away, and whatever it interrupted carries on from the same spot afterwards. Right-click a group to turn it on for every pad in it, and for pads added to it later.
+- **Loop:** right-click a pad and turn on **Loop**. It starts over each time it ends, until you press it again, skip or stop. Pads you press meanwhile wait in the queue. **🔁 Loop** in the bar at the bottom turns it on or off for whatever's playing, and stays set for next time. Right-click a group to loop every pad in it, and pads added to it later. You hear a tick when loop changes for what's playing, like when the queue changes. There's a short gap (a few hundredths of a second) each time it starts over.
+- **Jump and fade:** in the bar at the bottom, **⏮** starts what's playing over, **−10 s** and **+10 s** jump back and forward, and **Fade out** brings it down over 2 seconds, then the next one plays. Jumping past the end moves on to the next one.
 - **Preview and snippets:** click a pad to open its preview. Click anywhere on the waveform to hear it from there (only you hear it, and friends' audio leaves your headphones until you stop), press Space to pause, and drag across it to mark a snippet. **Play for friends** plays the selected snippet, the same way a press does.
-- **Groups:** click **+ Group** to make your own, then right-click a pad and choose **Group** to put it in one. Click a group to show only its pads. Hotkeys work for every pad, whichever group is showing. Sounds you add while a group is open go into it. Right-click a group to rename it, delete it, or turn on **Play instantly** for all of it; deleting a group keeps its pads.
-- **Pad options:** right-click a pad to **Rename**, **Set hotkey…**, choose its **Group**, turn on **Play instantly**, **Replace audio from YouTube…** or **Delete** it.
+- **Groups:** click **+ Group** to make your own, then right-click a pad and choose **Group** to put it in one. Click a group to show only its pads. Hotkeys work for every pad, whichever group is showing. Sounds you add while a group is open go into it. Right-click a group to rename it, delete it, or turn on **Play instantly** or **Loop** for all of it; deleting a group keeps its pads.
+- **Pad options:** right-click a pad to **Rename**, **Set hotkey…**, choose its **Group**, turn on **Play instantly** or **Loop**, **Replace audio from YouTube…** or **Delete** it.
 - **Editor:**
   - drag across the waveform to mark a section (it becomes its own pad)
   - drag a section's edges to trim it
@@ -45,7 +47,7 @@ Get VB-Cable from <https://vb-audio.com/Cable/>.
 - **Tray:** closing the window keeps the app running in the tray, so hotkeys still work. Quit from the tray menu.
 - **Settings (⚙):**
   - pick devices
-  - set Pause/Resume, Skip and Stop hotkeys
+  - set hotkeys for Pause/Resume, Skip, Stop, Fade out, Loop on/off, Restart, Back 10 s and Forward 10 s
   - turn on **Start with Windows**
 
 Your library lives in `%APPDATA%\SoundProjector\sounds\` (imported files are copies; originals are never touched), and everything else in `%APPDATA%\SoundProjector\settings.json`.
@@ -69,4 +71,4 @@ Your library lives in `%APPDATA%\SoundProjector\sounds\` (imported files are cop
    ```
    It downloads VB-CABLE into `target\vbcable` the first time, and writes `target\installer\SoundProjectorSetup.exe`. Upload that file to a new GitHub release.
 
-Run the tests with `cargo test`. Two hardware tests are opt-in: `cargo test -- --ignored`. One plays a silent tone through your default output; the other adds and then removes the Start with Windows registry entry.
+Run the tests with `cargo test`. The hardware tests are opt-in: `cargo test -- --ignored`. The playback ones run through your real outputs with both volumes at 0, so they're silent; one other adds and then removes the Start with Windows registry entry.

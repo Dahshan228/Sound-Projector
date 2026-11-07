@@ -14,6 +14,7 @@ pub struct Voice {
     stream: Option<rtrb::Consumer<f32>>,
     gain: f32,
     fade_in: u32, // frames of fade-in still to apply
+    end_fade: u64, // frames over which it fades out before `total`
 }
 
 impl Voice {
@@ -35,7 +36,14 @@ impl Voice {
             stream,
             gain,
             fade_in: if fade_in { FADE_FRAMES } else { 0 },
+            end_fade: FADE_FRAMES as u64,
         }
+    }
+
+    /// End it `frames` from now, fading all the way down, or at its own end if that comes first.
+    pub fn fade_out(&mut self, frames: u64) {
+        self.total = self.total.min(self.frames_done + frames);
+        self.end_fade = self.end_fade.max(self.total - self.frames_done); // already in its end fade: carry on from there
     }
 
     fn preroll_left(&self) -> usize {
@@ -75,10 +83,10 @@ impl Voice {
                 g *= 1.0 - self.fade_in as f32 / FADE_FRAMES as f32;
                 self.fade_in -= 1;
             }
-            // The last 5 ms fade out, so a trimmed end or a section doesn't click.
+            // The last 5 ms fade out (or more, after fade_out), so a trimmed end or a section doesn't click.
             let left = self.total - self.frames_done - k as u64;
-            if left < FADE_FRAMES as u64 {
-                g *= left as f32 / FADE_FRAMES as f32;
+            if left < self.end_fade {
+                g *= left as f32 / self.end_fade as f32;
             }
             f[0] *= g;
             f[1] *= g;
@@ -100,6 +108,7 @@ pub enum OutCmd {
     SetMain(Option<Box<Voice>>),
     SetPreview(Option<Box<Voice>>),
     Tick(f32), // Hz
+    FadeOut(u64), // the main voice, over this many frames
 }
 
 pub struct OutputControl {
@@ -251,6 +260,11 @@ impl OutputState {
                     self.tick_left = self.tick_len;
                     self.tick_phase = 0.0;
                     self.tick_step = std::f32::consts::TAU * hz / self.rate;
+                }
+                OutCmd::FadeOut(frames) => {
+                    if let Some(v) = self.main.as_mut() {
+                        v.fade_out(frames);
+                    }
                 }
             }
         }
@@ -491,6 +505,30 @@ mod tests {
         let b = run(&mut o, 2, 9600);
         let last = b.iter().rposition(|s| *s != 0.0).unwrap();
         assert!(b[last - 2000..].windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
+    }
+
+    #[test]
+    fn fade_out_goes_smoothly_down_to_silence_then_finishes() {
+        let (mut o, mut ctl, sh) = OutputState::new(2, 48_000, None);
+        set_main(&mut ctl, Voice::new(3, 0, 48_000, pre(vec![0.5; 96_000]), None, 1.0, false));
+        let mut b = run(&mut o, 2, 4800);
+        assert!(ctl.cmds.push(OutCmd::FadeOut(9600)).is_ok());
+        b.extend(run(&mut o, 2, 14_400));
+        let at = |frame: usize| b[(frame + Limiter::new(48_000, LIMIT_THRESHOLD).latency_frames()) * 2];
+        assert!(b[4000..].windows(2).all(|w| (w[1] - w[0]).abs() < 0.01), "a jump would click");
+        assert!((at(4800 + 4800) - 0.25).abs() < 1e-3, "half way down after half the fade: {}", at(4800 + 4800));
+        assert!((0..4000).all(|f| at(4800 + 9600 + f).abs() < 1e-6), "silent once the fade is over");
+        assert_eq!(sh.take_finished(), Some(3), "and over, so the next one can play");
+    }
+
+    #[test]
+    fn fading_out_right_before_the_end_doesnt_jump_back_up() {
+        let (mut o, mut ctl, _) = OutputState::new(2, 48_000, None);
+        set_main(&mut ctl, Voice::new(1, 0, 4800, pre(vec![0.5; 9600]), None, 1.0, false));
+        let mut b = run(&mut o, 2, 4700); // inside its own 5 ms end fade
+        assert!(ctl.cmds.push(OutCmd::FadeOut(9600)).is_ok());
+        b.extend(run(&mut o, 2, 480));
+        assert!(b[4000..].windows(2).all(|w| (w[1] - w[0]).abs() < 0.01));
     }
 
     #[test]

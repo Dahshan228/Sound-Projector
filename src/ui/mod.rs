@@ -28,14 +28,6 @@ pub const ERROR: Color32 = Color32::from_rgb(0xff, 0x8a, 0x8a);
 pub const WARN_BG: Color32 = Color32::from_rgb(0x2a, 0x22, 0x14);
 pub const WARN: Color32 = Color32::from_rgb(0xf5, 0xc2, 0x7a);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CaptureTarget {
-    Pad(PadId),
-    Pause,
-    Skip,
-    Stop,
-}
-
 type ImportResult = (PathBuf, PadId, Result<Source, String>);
 
 #[derive(Default)]
@@ -57,7 +49,7 @@ pub struct App {
     engine: Engine,
     tx: Sender<Cmd>,
     hotkeys: HotkeyService,
-    capture: Option<(CaptureTarget, [bool; 256])>,
+    capture: Option<(HotkeyAction, [bool; 256])>,
     capture_msg: Option<String>,
     import_tx: Sender<ImportResult>,
     import_rx: Receiver<ImportResult>,
@@ -69,6 +61,7 @@ pub struct App {
     settings_open: bool,
     devices: (Vec<String>, Vec<String>),
     show_request: Arc<AtomicBool>,
+    loop_request: Arc<AtomicBool>, // the Loop hotkey was pressed
     tray: Option<tray_icon::TrayIcon>,
     start_hidden: bool,
     first_run: bool, // no settings file yet: open Settings with the setup guide showing
@@ -99,19 +92,61 @@ pub fn pad_plays(s: &Settings) -> Vec<PadPlay> {
         .iter()
         .filter_map(|p| {
             let src = s.sources.iter().find(|x| x.id == p.source)?;
-            Some(PadPlay { id: p.id, path: dir.join(&src.file), rate: src.rate, start: p.start, end: p.end, boost_db: p.boost_db, instant: p.instant })
+            Some(PadPlay { id: p.id, path: dir.join(&src.file), rate: src.rate, start: p.start, end: p.end, boost_db: p.boost_db, instant: p.instant, looping: p.looping })
         })
         .collect()
 }
 
-pub fn bindings(s: &Settings) -> Vec<(HotkeyAction, Hotkey)> {
-    let mut b: Vec<(HotkeyAction, Hotkey)> = s.pads.iter().filter_map(|p| Some((HotkeyAction::Pad(p.id), p.hotkey?))).collect();
-    for (a, k) in [(HotkeyAction::Pause, s.pause_key), (HotkeyAction::Skip, s.skip_key), (HotkeyAction::Stop, s.stop_key)] {
-        if let Some(k) = k {
-            b.push((a, k));
-        }
+/// Seconds that Back and Forward jump.
+const JUMP_SECS: f32 = 10.0;
+
+/// The control hotkeys, in the order Settings lists them.
+pub const CONTROLS: [(HotkeyAction, &str); 8] = [
+    (HotkeyAction::Pause, "Pause/Resume"),
+    (HotkeyAction::Skip, "Skip"),
+    (HotkeyAction::Stop, "Stop"),
+    (HotkeyAction::FadeOut, "Fade out"),
+    (HotkeyAction::Loop, "Loop on/off"),
+    (HotkeyAction::Restart, "Restart"),
+    (HotkeyAction::Back, "Back 10 s"),
+    (HotkeyAction::Forward, "Forward 10 s"),
+];
+
+pub fn key_of(s: &Settings, a: HotkeyAction) -> Option<Hotkey> {
+    match a {
+        HotkeyAction::Pad(id) => s.pads.iter().find(|p| p.id == id).and_then(|p| p.hotkey),
+        HotkeyAction::Pause => s.pause_key,
+        HotkeyAction::Skip => s.skip_key,
+        HotkeyAction::Stop => s.stop_key,
+        HotkeyAction::FadeOut => s.fade_key,
+        HotkeyAction::Loop => s.loop_key,
+        HotkeyAction::Restart => s.restart_key,
+        HotkeyAction::Back => s.back_key,
+        HotkeyAction::Forward => s.forward_key,
     }
-    b
+}
+
+pub fn set_key(s: &mut Settings, a: HotkeyAction, h: Option<Hotkey>) {
+    let slot = match a {
+        HotkeyAction::Pad(id) => match s.pads.iter_mut().find(|p| p.id == id) {
+            Some(p) => &mut p.hotkey,
+            None => return,
+        },
+        HotkeyAction::Pause => &mut s.pause_key,
+        HotkeyAction::Skip => &mut s.skip_key,
+        HotkeyAction::Stop => &mut s.stop_key,
+        HotkeyAction::FadeOut => &mut s.fade_key,
+        HotkeyAction::Loop => &mut s.loop_key,
+        HotkeyAction::Restart => &mut s.restart_key,
+        HotkeyAction::Back => &mut s.back_key,
+        HotkeyAction::Forward => &mut s.forward_key,
+    };
+    *slot = h;
+}
+
+pub fn bindings(s: &Settings) -> Vec<(HotkeyAction, Hotkey)> {
+    let pads = s.pads.iter().map(|p| HotkeyAction::Pad(p.id));
+    pads.chain(CONTROLS.map(|c| c.0)).filter_map(|a| Some((a, key_of(s, a)?))).collect()
 }
 
 /// Click to set a key, right-click to clear it.
@@ -214,12 +249,23 @@ impl App {
         let engine = Engine::start(choice, volumes(&s), pad_plays(&s), Box::new(move || ctx.request_repaint()));
         let tx = engine.sender();
         let (htx, hctx) = (tx.clone(), cc.egui_ctx.clone());
+        let loop_request = Arc::new(AtomicBool::new(false));
+        let hloop = loop_request.clone();
         let hotkeys = HotkeyService::start(move |a| {
             let _ = htx.send(match a {
                 HotkeyAction::Pad(id) => Cmd::Press(id),
                 HotkeyAction::Pause => Cmd::TogglePause,
                 HotkeyAction::Skip => Cmd::Skip,
                 HotkeyAction::Stop => Cmd::Stop,
+                HotkeyAction::FadeOut => Cmd::FadeOut,
+                HotkeyAction::Restart => Cmd::Seek(0.0),
+                HotkeyAction::Back => Cmd::SeekBy(-JUMP_SECS),
+                HotkeyAction::Forward => Cmd::SeekBy(JUMP_SECS),
+                HotkeyAction::Loop => {
+                    hloop.store(true, Ordering::Relaxed); // a pad setting, so the window changes and saves it
+                    hctx.request_repaint();
+                    return;
+                }
             });
             hctx.request_repaint();
         });
@@ -247,6 +293,7 @@ impl App {
             settings_open: false,
             devices: (Vec::new(), Vec::new()),
             show_request,
+            loop_request,
             tray,
             start_hidden: std::env::args().any(|a| a == "--tray"),
             first_run: !settings_path().exists(),
@@ -418,42 +465,26 @@ impl App {
         }
     }
 
-    fn start_capture(&mut self, t: CaptureTarget) {
+    fn start_capture(&mut self, t: HotkeyAction) {
         self.hotkeys.set_bindings(vec![]); // so existing keys don't fire while choosing
         self.capture = Some((t, keyboard_snapshot()));
         self.capture_msg = None;
     }
 
-    fn key_of(&self, t: CaptureTarget) -> Option<Hotkey> {
-        match t {
-            CaptureTarget::Pad(id) => self.s.pads.iter().find(|p| p.id == id).and_then(|p| p.hotkey),
-            CaptureTarget::Pause => self.s.pause_key,
-            CaptureTarget::Skip => self.s.skip_key,
-            CaptureTarget::Stop => self.s.stop_key,
-        }
-    }
-
-    fn set_key(&mut self, t: CaptureTarget, h: Option<Hotkey>) {
-        match t {
-            CaptureTarget::Pad(id) => {
-                if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
-                    p.hotkey = h;
-                }
-            }
-            CaptureTarget::Pause => self.s.pause_key = h,
-            CaptureTarget::Skip => self.s.skip_key = h,
-            CaptureTarget::Stop => self.s.stop_key = h,
-        }
-    }
-
-    fn owner_of(&self, h: Hotkey, except: CaptureTarget) -> Option<String> {
-        if let Some(p) = self.s.pads.iter().find(|p| p.hotkey == Some(h) && except != CaptureTarget::Pad(p.id)) {
+    fn owner_of(&self, h: Hotkey, except: HotkeyAction) -> Option<String> {
+        if let Some(p) = self.s.pads.iter().find(|p| p.hotkey == Some(h) && except != HotkeyAction::Pad(p.id)) {
             return Some(p.name.clone());
         }
-        [(CaptureTarget::Pause, self.s.pause_key, "Pause/Resume"), (CaptureTarget::Skip, self.s.skip_key, "Skip"), (CaptureTarget::Stop, self.s.stop_key, "Stop")]
-            .into_iter()
-            .find(|(t, k, _)| *k == Some(h) && *t != except)
-            .map(|(_, _, n)| n.to_string())
+        CONTROLS.iter().find(|(a, _)| *a != except && key_of(&self.s, *a) == Some(h)).map(|(_, n)| n.to_string())
+    }
+
+    /// Loop on or off for the pad that's playing. It's the pad's own setting, so it sticks.
+    fn toggle_loop(&mut self) {
+        let Some((_, id)) = self.engine.view().current else { return };
+        if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
+            p.looping = !p.looping;
+        }
+        self.sync();
     }
 
     fn poll_capture(&mut self, ctx: &egui::Context) {
@@ -471,7 +502,7 @@ impl App {
                     self.capture = Some((target, keyboard_snapshot()));
                     return;
                 }
-                self.set_key(target, Some(h));
+                set_key(&mut self.s, target, Some(h));
                 self.capture = None;
                 self.sync();
             }
@@ -675,7 +706,6 @@ impl App {
                     None if view.preview_secs.is_some() => egui::RichText::new("Previewing: only you hear it").color(MUTED),
                     None => egui::RichText::new("Nothing playing").color(MUTED),
                 };
-                ui.label(title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(playing, |ui| {
                         if ui.button("■ Stop").on_hover_text("Stop, and clear the queue").clicked() {
@@ -688,13 +718,33 @@ impl App {
                         if ui.button(pause).clicked() {
                             let _ = self.tx.send(Cmd::TogglePause);
                         }
+                        if ui.button("Fade out").on_hover_text("Bring it down over 2 seconds, then the next one plays").clicked() {
+                            let _ = self.tx.send(Cmd::FadeOut);
+                        }
+                        let looping = view.current.is_some_and(|(_, id)| self.s.pads.iter().any(|p| p.id == id && p.looping));
+                        if ui.add(egui::Button::new("🔁 Loop").selected(looping)).on_hover_text("Start this pad over each time it ends. It stays set for next time.").clicked() {
+                            self.toggle_loop();
+                        }
                     });
+                    // What's left of the row, so a long name is cut short instead of running under the buttons.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(title).truncate()));
                 });
             });
             ui.horizontal(|ui| {
                 if !playing {
                     self.seek_drag = None; // it ended mid-drag
                 }
+                ui.add_enabled_ui(playing, |ui| {
+                    if ui.small_button("⏮").on_hover_text("Restart").clicked() {
+                        let _ = self.tx.send(Cmd::Seek(0.0));
+                    }
+                    if ui.small_button("−10 s").on_hover_text("Back 10 seconds").clicked() {
+                        let _ = self.tx.send(Cmd::SeekBy(-JUMP_SECS));
+                    }
+                    if ui.small_button("+10 s").on_hover_text("Forward 10 seconds").clicked() {
+                        let _ = self.tx.send(Cmd::SeekBy(JUMP_SECS));
+                    }
+                });
                 let frac = self.seek_drag.unwrap_or(if view.dur_secs > 0.0 { view.pos_secs / view.dur_secs } else { 0.0 });
                 let shown = if self.seek_drag.is_some() { frac * view.dur_secs } else { view.pos_secs };
                 ui.label(egui::RichText::new(fmt_time(shown as f64)).color(MUTED).monospace());
@@ -801,7 +851,7 @@ impl App {
             }
             Some(editor::EditorAction::Listen { from, to, boost_db }) => {
                 if let Some(src) = self.editor.as_ref().and_then(|e| self.s.sources.iter().find(|s| s.id == e.source)) {
-                    let p = PadPlay { id: 0, path: sounds_dir().join(&src.file), rate: src.rate, start: from, end: to, boost_db, instant: false };
+                    let p = PadPlay { id: 0, path: sounds_dir().join(&src.file), rate: src.rate, start: from, end: to, boost_db, instant: false, looping: false };
                     let _ = self.tx.send(Cmd::Preview(p));
                 }
             }
@@ -812,7 +862,7 @@ impl App {
             Some(editor::EditorAction::StopPreview) => {
                 let _ = self.tx.send(Cmd::StopPreview);
             }
-            Some(editor::EditorAction::Capture(id)) => self.start_capture(CaptureTarget::Pad(id)),
+            Some(editor::EditorAction::Capture(id)) => self.start_capture(HotkeyAction::Pad(id)),
             Some(editor::EditorAction::Delete(id)) => self.confirm_delete = Some(id),
             Some(editor::EditorAction::None) | None => {}
         }
@@ -882,6 +932,12 @@ impl App {
                         self.sync();
                         ui.close();
                     }
+                    let mut looping = g.looping;
+                    if ui.checkbox(&mut looping, "Loop").on_hover_text("Every pad in this group starts over each time it ends, and so do pads added to it later.").changed() {
+                        self.s.set_group_loop(g.id, looping);
+                        self.sync();
+                        ui.close();
+                    }
                     if ui.button("Delete group").clicked() {
                         self.confirm_delete_group = Some(g.clone());
                         ui.close();
@@ -923,6 +979,9 @@ impl App {
 
         let secs = src.as_ref().map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
         let mut meta = if src.as_ref().is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
+        if pad.looping {
+            meta.insert_str(0, "Loop · ");
+        }
         if pad.instant {
             meta.insert_str(0, "Instant · ");
         }
@@ -961,11 +1020,11 @@ impl App {
                 ui.close();
             }
             if ui.button("Set hotkey…").clicked() {
-                self.start_capture(CaptureTarget::Pad(id));
+                self.start_capture(HotkeyAction::Pad(id));
                 ui.close();
             }
             if pad.hotkey.is_some() && ui.button("Clear hotkey").clicked() {
-                self.set_key(CaptureTarget::Pad(id), None);
+                set_key(&mut self.s, HotkeyAction::Pad(id), None);
                 self.sync();
                 ui.close();
             }
@@ -993,6 +1052,14 @@ impl App {
             if ui.checkbox(&mut instant, "Play instantly").on_hover_text("Cuts in right away instead of queueing. What was playing carries on afterwards.").changed() {
                 if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
                     p.instant = instant;
+                }
+                self.sync();
+                ui.close();
+            }
+            let mut looping = pad.looping;
+            if ui.checkbox(&mut looping, "Loop").on_hover_text("Starts over each time it ends, until you press it again, skip or stop. Pads you press meanwhile wait.").changed() {
+                if let Some(p) = self.s.pads.iter_mut().find(|p| p.id == id) {
+                    p.looping = looping;
                 }
                 self.sync();
                 ui.close();
@@ -1103,7 +1170,7 @@ impl App {
             } else {
                 let id = self.s.new_id();
                 self.set_notice(if dialog.pad.is_some() { format!("Added to '{clean}'.") } else { format!("Made '{clean}'. Right-click a pad to put it in this group.") });
-                self.s.groups.push(Group { id, name: clean, instant: false });
+                self.s.groups.push(Group { id, name: clean, instant: false, looping: false });
                 if let Some(p) = self.s.pads.iter_mut().find(|p| Some(p.id) == dialog.pad) {
                     p.group = Some(id);
                 }
@@ -1139,7 +1206,7 @@ impl App {
             });
         }
         if let Some((target, _)) = self.capture {
-            let current = self.key_of(target);
+            let current = key_of(&self.s, target);
             egui::Modal::new(Id::unique("capture")).show(ctx, |ui| {
                 ui.set_width(320.0);
                 ui.label(egui::RichText::new("Press a key…").font(semibold(16.0)));
@@ -1152,7 +1219,7 @@ impl App {
                         self.end_capture();
                     }
                     if current.is_some() && ui.button("Clear key").clicked() {
-                        self.set_key(target, None);
+                        set_key(&mut self.s, target, None);
                         self.end_capture();
                     }
                     ui.label(egui::RichText::new("Esc cancels").color(MUTED));
@@ -1210,6 +1277,9 @@ impl eframe::App for App {
         if self.show_request.swap(false, Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.loop_request.swap(false, Ordering::Relaxed) {
+            self.toggle_loop();
         }
         // Without a tray icon there'd be no way back (or to quit), so closing quits.
         if self.tray.is_some() && ctx.input(|i| i.viewport().close_requested()) {
@@ -1273,5 +1343,21 @@ mod tests {
         ] {
             assert_eq!(press_hint(view, pad, instant).1, want, "pad {pad}, instant {instant}, paused {}", view.paused);
         }
+    }
+
+    #[test]
+    fn every_control_key_is_kept_apart_and_registered() {
+        let mut s = Settings::default();
+        let key = |i: usize| Some(Hotkey { mods: 0, vk: 0x7C + i as u32 }); // F13 and up
+        for (i, (a, _)) in CONTROLS.iter().enumerate() {
+            set_key(&mut s, *a, key(i));
+        }
+        let b = bindings(&s);
+        for (i, (a, _)) in CONTROLS.iter().enumerate() {
+            assert_eq!(key_of(&s, *a), key(i), "{a:?}");
+            assert!(b.contains(&(*a, key(i).unwrap())), "{a:?}");
+        }
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s, "they're saved");
     }
 }
