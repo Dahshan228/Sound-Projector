@@ -235,23 +235,29 @@ fn fetch_audio(url: &str, tools: &Path, job_dir: &Path, account: Option<&Path>, 
         .spawn()
         .map_err(|e| e.to_string())?;
     if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let line = line.trim();
-            if line.starts_with("100") && line.ends_with('%') {
-                status("Saving from YouTube in lossless quality…".into());
-            } else if line.ends_with('%') {
-                status(format!("Downloading from YouTube: {line}"));
-            }
-        }
+        report_progress(BufReader::new(out), status);
     }
     let ok = child.wait().map_err(|e| e.to_string())?.success();
     let flac = std::fs::read_dir(job_dir).map_err(|e| e.to_string())?.flatten().map(|f| f.path()).find(|p| p.extension().is_some_and(|e| e == "flac"));
     match flac {
         Some(path) if ok => Ok(path),
         _ => {
-            let text = std::fs::read_to_string(&errors).unwrap_or_default();
+            let text = String::from_utf8_lossy(&std::fs::read(&errors).unwrap_or_default()).into_owned();
             let reason = text.lines().rev().find_map(|l| l.strip_prefix("ERROR: "));
             Err(explain(reason.unwrap_or("the download didn't finish").to_string(), account.is_some()))
+        }
+    }
+}
+
+/// Reads to the end even when a line isn't UTF-8: yt-dlp writes titles in the Windows code page, and closing the pipe early makes it fail.
+fn report_progress(out: impl BufRead, status: &mut dyn FnMut(String)) {
+    for line in out.split(b'\n').map_while(Result::ok) {
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim();
+        if line.starts_with("100") && line.ends_with('%') {
+            status("Saving from YouTube in lossless quality…".into());
+        } else if line.ends_with('%') {
+            status(format!("Downloading from YouTube: {line}"));
         }
     }
 }
@@ -474,6 +480,15 @@ mod tests {
         let src = import(&file, &crate::testutil::temp_dir("yt-premium-lib"), 1).unwrap();
         println!("{src:?}");
         assert!(src.file.ends_with(".flac") && src.frames > 0);
+    }
+
+    #[test]
+    fn progress_keeps_reading_past_titles_that_arent_utf8() {
+        // yt-dlp writes titles in the Windows code page, so "I’m" arrives as 0x92. Stopping there closes the pipe and yt-dlp fails with "[Errno 22] Invalid argument".
+        let out: &[u8] = b"[download] Destination: I\x92m Enough.webm\n  42.0%\n100.0%\n";
+        let mut seen = vec![];
+        report_progress(out, &mut |s| seen.push(s));
+        assert_eq!(seen, ["Downloading from YouTube: 42.0%", "Saving from YouTube in lossless quality…"]);
     }
 
     #[test]
