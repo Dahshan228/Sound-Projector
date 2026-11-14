@@ -1,3 +1,4 @@
+use super::icons::{Icon, atom};
 use super::{ACCENT, ACCENT_LIGHT, BORDER, MUTED, TEXT, hotkey_field, press_hint, semibold};
 use crate::engine::View;
 use crate::hotkeys::HotkeyAction;
@@ -311,15 +312,15 @@ impl Editor {
         let min_len = secs_to_frames(0.05, src.rate).max(1);
         ui.horizontal(|ui| {
             let (icon, words) = press_hint(view, pad.id, pad.instant);
-            let friends = egui::Button::new(egui::RichText::new(format!("{icon} {words}")).color(TEXT)).fill(ACCENT);
+            let friends = egui::Button::new((atom(icon), egui::RichText::new(words).color(TEXT))).fill(ACCENT);
             if ui.add(friends).clicked() {
                 action = Some(EditorAction::Press(pad.id));
             }
             if view.preview_secs.is_some() {
-                if ui.button("■ Stop preview").clicked() {
+                if ui.button((atom(Icon::Stop), "Stop preview")).clicked() {
                     action = Some(EditorAction::StopPreview);
                 }
-            } else if ui.button("▶ Preview").on_hover_text("Plays this part to you only").clicked() {
+            } else if ui.button((atom(Icon::Play), "Preview")).on_hover_text("Plays this part to you only").clicked() {
                 let (a, b, boost) = (pad.start, pad.end, pad.boost_db);
                 action = Some(self.listen_range(a, b, boost));
             }
