@@ -1,5 +1,8 @@
 pub mod editor;
+pub mod icons;
 pub mod settings_panel;
+
+use icons::Icon;
 
 use crate::engine::{Cmd, DeviceChoice, Engine, PadPlay, View, Volumes};
 use crate::hotkeys::{Captured, HotkeyAction, HotkeyService, key_name, keyboard_snapshot, poll_capture};
@@ -166,16 +169,24 @@ pub fn hotkey_field(ui: &mut egui::Ui, key: Option<Hotkey>, failed: bool) -> egu
 }
 
 /// What pressing this pad would do right now, as (icon, words), so a button never has to be guessed at.
-fn press_hint(view: &View, pad: PadId, instant: bool) -> (&'static str, &'static str) {
+fn press_hint(view: &View, pad: PadId, instant: bool) -> (Icon, &'static str) {
     if view.current.is_some_and(|c| c.1 == pad) {
-        if view.paused { ("▶", "Resume") } else { ("■", "Stop") }
+        if view.paused { (Icon::Play, "Resume") } else { (Icon::Stop, "Stop") }
     } else if instant || view.current.is_none() {
-        ("▶", "Play for friends")
+        (Icon::Play, "Play for friends")
     } else if view.up_next.iter().any(|e| e.1 == pad) {
-        ("×", "Remove from queue")
+        (Icon::Close, "Remove from queue")
     } else {
-        ("+", "Add to queue")
+        (Icon::Plus, "Add to queue")
     }
+}
+
+/// A button that's only an icon. `name` is its tooltip, and what screen readers call it.
+pub fn icon_button(ui: &mut egui::Ui, icon: Icon, name: &str, small: bool) -> egui::Response {
+    let b = egui::Button::new(icons::atom(icon));
+    let r = ui.add(if small { b.small() } else { b });
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
+    r.on_hover_text(name)
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -191,7 +202,7 @@ fn setup_style(ctx: &egui::Context) {
         fonts.font_data.insert("segoe-sb".into(), Arc::new(egui::FontData::from_owned(b)));
         semibold.insert(0, "segoe-sb".into());
     }
-    // Segoe UI has no media-control glyphs (⏸ ⏭); Segoe UI Symbol does.
+    // Segoe UI Symbol fills in characters Segoe UI lacks.
     if let Ok(b) = std::fs::read(r"C:\Windows\Fonts\seguisym.ttf") {
         fonts.font_data.insert("segoe-sym".into(), Arc::new(egui::FontData::from_owned(b)));
         fonts.families.entry(FontFamily::Proportional).or_default().push("segoe-sym".into());
@@ -582,7 +593,7 @@ impl App {
                 // Narrow windows get shorter sliders, so all three fit.
                 ui.spacing_mut().slider_width = if ui.available_width() < 720.0 { 70.0 } else { 100.0 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙").on_hover_text("Settings").clicked() {
+                    if icon_button(ui, Icon::Settings, "Settings", false).clicked() {
                         self.open_settings();
                     }
                     ui.add_space(8.0);
@@ -697,7 +708,7 @@ impl App {
             if let Some((n, _)) = self.notice.clone() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(n).color(TEXT));
-                    if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                    if icon_button(ui, Icon::Close, "Dismiss", true).clicked() {
                         self.notice = None;
                     }
                 });
@@ -711,32 +722,39 @@ impl App {
             let playing = view.current.is_some();
             ui.horizontal(|ui| {
                 let title = match view.current {
-                    Some((_, pad)) => egui::RichText::new(format!("{}  {}", if view.paused { "⏸" } else { "▶" }, self.pad_name(pad))).font(semibold(14.0)),
+                    Some((_, pad)) => egui::RichText::new(self.pad_name(pad)).font(semibold(14.0)),
                     None if view.preview_secs.is_some() => egui::RichText::new("Previewing: only you hear it").color(MUTED),
                     None => egui::RichText::new("Nothing playing").color(MUTED),
                 };
+                let button = |icon, text| egui::Button::new((icons::atom(icon), text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(playing, |ui| {
-                        if ui.button("■ Stop").on_hover_text("Stop, and clear the queue").clicked() {
+                        if ui.add(button(Icon::Stop, "Stop")).on_hover_text("Stop, and clear the queue").clicked() {
                             let _ = self.tx.send(Cmd::Stop);
                         }
-                        if ui.button("⏭ Skip").on_hover_text("Play the next one in the queue").clicked() {
+                        if ui.add(button(Icon::Next, "Skip")).on_hover_text("Play the next one in the queue").clicked() {
                             let _ = self.tx.send(Cmd::Skip);
                         }
-                        let pause = if view.paused { "▶ Resume" } else { "⏸ Pause" };
-                        if ui.button(pause).clicked() {
+                        let pause = if view.paused { button(Icon::Play, "Resume") } else { button(Icon::Pause, "Pause") };
+                        if ui.add(pause).clicked() {
                             let _ = self.tx.send(Cmd::TogglePause);
                         }
-                        if ui.button("Fade out").on_hover_text("Bring it down over 2 seconds, then the next one plays").clicked() {
+                        if ui.add(button(Icon::Fade, "Fade out")).on_hover_text("Bring it down over 2 seconds, then the next one plays").clicked() {
                             let _ = self.tx.send(Cmd::FadeOut);
                         }
                         let looping = view.current.is_some_and(|(_, id)| self.s.pads.iter().any(|p| p.id == id && p.looping));
-                        if ui.add(egui::Button::new("🔁 Loop").selected(looping)).on_hover_text("Start this pad over each time it ends. It stays set for next time.").clicked() {
+                        if ui.add(button(Icon::Loop, "Loop").selected(looping)).on_hover_text("Start this pad over each time it ends. It stays set for next time.").clicked() {
                             self.toggle_loop();
                         }
                     });
                     // What's left of the row, so a long name is cut short instead of running under the buttons.
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(title).truncate()));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if playing {
+                            let (rect, _) = ui.allocate_exact_size(vec2(icons::SIZE, icons::SIZE), Sense::hover());
+                            icons::paint(ui.painter(), rect, if view.paused { Icon::Pause } else { Icon::Play }, TEXT);
+                        }
+                        ui.add(egui::Label::new(title).truncate())
+                    });
                 });
             });
             ui.horizontal(|ui| {
@@ -744,7 +762,7 @@ impl App {
                     self.seek_drag = None; // it ended mid-drag
                 }
                 ui.add_enabled_ui(playing, |ui| {
-                    if ui.small_button("⏮").on_hover_text("Restart").clicked() {
+                    if icon_button(ui, Icon::Restart, "Restart", true).clicked() {
                         let _ = self.tx.send(Cmd::Seek(0.0));
                     }
                     if ui.small_button("−10 s").on_hover_text("Back 10 seconds").clicked() {
@@ -808,16 +826,19 @@ impl App {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.dnd_drag_source(Id::unique(("queue", entry)), entry, |ui| {
-                                        ui.label(egui::RichText::new("⋮⋮").color(MUTED)).on_hover_text("Drag to reorder");
+                                        let (rect, r) = ui.allocate_exact_size(vec2(10.0, icons::SIZE), Sense::hover());
+                                        icons::paint(ui.painter(), rect, Icon::Grip, MUTED);
+                                        r.on_hover_text("Drag to reorder");
                                     });
-                                    ui.add(egui::Label::new(self.pad_name(pad)).truncate());
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.small_button("×").on_hover_text("Remove from queue").clicked() {
+                                        if icon_button(ui, Icon::Close, "Remove from queue", true).clicked() {
                                             remove = Some(entry);
                                         }
-                                        if ui.small_button("▶").on_hover_text("Play now").clicked() {
+                                        if icon_button(ui, Icon::Play, "Play now", true).clicked() {
                                             play_now = Some(entry);
                                         }
+                                        // What's left of the row, so a long name is cut short instead of running under the buttons.
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(self.pad_name(pad)).truncate()));
                                     });
                                 });
                             });
@@ -932,7 +953,7 @@ impl App {
 
     /// Ctrl+F jumps here and Esc clears it. Returns true when Enter was pressed, to press the first match.
     fn search_box(&mut self, ui: &mut egui::Ui) -> bool {
-        let r = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search (Ctrl+F)").desired_width(180.0));
+        let r = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text((icons::atom(Icon::Search), "Search (Ctrl+F)")).desired_width(180.0));
         if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F))) {
             r.request_focus();
         }
@@ -1015,7 +1036,7 @@ impl App {
         let r = if name.elided { r.on_hover_text(&pad.name) } else { r }; // the whole name, when it's cut short
         p.galley(inner.left_top(), name, TEXT);
         p.circle_filled(play.center(), 12.0, if pr.hovered() { ACCENT_LIGHT } else { ACCENT });
-        p.text(play.center() + vec2(if icon == "▶" { 1.0 } else { 0.0 }, 0.0), Align2::CENTER_CENTER, icon, FontId::proportional(if matches!(icon, "+" | "×") { 17.0 } else { 11.0 }), Color32::WHITE);
+        icons::paint(p, Rect::from_center_size(play.center(), vec2(12.0, 12.0)), icon, Color32::WHITE);
 
         let secs = src.as_ref().map_or(0.0, |s| frames_to_secs(pad.end - pad.start, s.rate));
         let mut meta = if src.as_ref().is_some_and(|s| is_clip(&pad, s)) { format!("Song clip · {}", fmt_time(secs)) } else { fmt_time(secs) };
