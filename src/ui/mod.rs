@@ -80,6 +80,13 @@ pub struct App {
     group_dialog: Option<GroupDialog>,
     confirm_delete_group: Option<Group>,
     new_pad_groups: HashMap<PadId, u32>, // sounds still on their way, and the group that was open when they were added
+    search: String,
+}
+
+/// Every word of the search is in one of the names, in any order. An empty search matches everything.
+fn matches(search: &str, names: &[&str]) -> bool {
+    let names = names.join(" ").to_lowercase();
+    search.to_lowercase().split_whitespace().all(|w| names.contains(w))
 }
 
 fn volumes(s: &Settings) -> Volumes {
@@ -312,6 +319,7 @@ impl App {
             group_dialog: None,
             confirm_delete_group: None,
             new_pad_groups: HashMap::new(),
+            search: String::new(),
         };
         if app.s.start_with_windows {
             let _ = crate::tray::set_autostart(true); // the exe may have moved since it was turned on
@@ -344,6 +352,7 @@ impl App {
 
     /// The id for a pad that's on its way. It joins whichever group is open now.
     fn new_pad_id(&mut self) -> PadId {
+        self.search.clear(); // or the new pad could arrive hidden by it
         let id = self.s.new_id();
         if let Some(g) = self.group_view {
             self.new_pad_groups.insert(id, g);
@@ -885,12 +894,24 @@ impl App {
                 }
             });
             ui.add_space(gap - ui.spacing().item_spacing.y);
-            self.group_row(ui);
+            let enter = self.group_row(ui);
             ui.add_space(gap - ui.spacing().item_spacing.y);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let failed = self.hotkeys.failed();
-                let ids: Vec<PadId> = self.s.pads.iter().filter(|p| self.group_view.is_none_or(|g| p.group == Some(g))).map(|p| p.id).collect();
-                if ids.is_empty() && self.group_view.is_some() {
+                let song = |p: &crate::settings::Pad| self.s.sources.iter().find(|s| s.id == p.source).map_or("", |s| s.name.as_str());
+                let ids: Vec<PadId> = self
+                    .s
+                    .pads
+                    .iter()
+                    .filter(|p| self.group_view.is_none_or(|g| p.group == Some(g)) && matches(&self.search, &[&p.name, song(p)]))
+                    .map(|p| p.id)
+                    .collect();
+                if enter && let Some(&first) = ids.first() {
+                    let _ = self.tx.send(Cmd::Press(first));
+                }
+                if ids.is_empty() && !self.search.trim().is_empty() {
+                    ui.label(egui::RichText::new(format!("No sounds match \"{}\". Esc clears the search.", self.search.trim())).color(MUTED));
+                } else if ids.is_empty() && self.group_view.is_some() {
                     ui.label(egui::RichText::new("Nothing in this group yet. Right-click a pad under All to put it here, or add a sound while this group is open.").color(MUTED));
                 }
                 for row in 0..ids.len().div_ceil(cols) {
@@ -909,10 +930,26 @@ impl App {
         });
     }
 
+    /// Ctrl+F jumps here and Esc clears it. Returns true when Enter was pressed, to press the first match.
+    fn search_box(&mut self, ui: &mut egui::Ui) -> bool {
+        let r = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search (Ctrl+F)").desired_width(180.0));
+        if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F))) {
+            r.request_focus();
+        }
+        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search.clear();
+        }
+        r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+    }
+
     /// Choosing a group only changes which pads show. Every pad's hotkey keeps working.
-    fn group_row(&mut self, ui: &mut egui::Ui) {
+    /// Starts with the search box. Returns true when Enter was pressed in it.
+    fn group_row(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut enter = false;
         // About two and a half rows, so a long list scrolls instead of pushing the pads out of the window.
         egui::ScrollArea::vertical().id_salt("groups").max_height(88.0).auto_shrink([false, true]).show(ui, |ui| ui.horizontal_wrapped(|ui| {
+            enter = self.search_box(ui);
+            ui.add_space(4.0);
             if ui.selectable_label(self.group_view.is_none(), "All").clicked() {
                 self.group_view = None;
             }
@@ -948,6 +985,7 @@ impl App {
                 self.group_dialog = Some(GroupDialog::default());
             }
         }));
+        enter
     }
 
     fn pad_tile(&mut self, ui: &mut egui::Ui, id: PadId, w: f32, view: &View, failed: &[HotkeyAction]) {
@@ -973,7 +1011,9 @@ impl App {
         let inner = rect.shrink2(vec2(12.0, 10.0));
         let mut job = egui::text::LayoutJob::simple_singleline(pad.name.clone(), semibold(14.0), TEXT);
         job.wrap = egui::text::TextWrapping::truncate_at_width(inner.width() - 26.0);
-        p.galley(inner.left_top(), p.layout_job(job), TEXT);
+        let name = p.layout_job(job);
+        let r = if name.elided { r.on_hover_text(&pad.name) } else { r }; // the whole name, when it's cut short
+        p.galley(inner.left_top(), name, TEXT);
         p.circle_filled(play.center(), 12.0, if pr.hovered() { ACCENT_LIGHT } else { ACCENT });
         p.text(play.center() + vec2(if icon == "▶" { 1.0 } else { 0.0 }, 0.0), Align2::CENTER_CENTER, icon, FontId::proportional(if matches!(icon, "+" | "×") { 17.0 } else { 11.0 }), Color32::WHITE);
 
@@ -1343,6 +1383,16 @@ mod tests {
         ] {
             assert_eq!(press_hint(view, pad, instant).1, want, "pad {pad}, instant {instant}, paused {}", view.paused);
         }
+    }
+
+    #[test]
+    fn search_matches_every_word_in_any_order() {
+        let names = ["Drop", "Lil Uzi Vert – XO Tour Llif3 (Café mix)"];
+        assert!(matches("", &names) && matches("   ", &names));
+        assert!(matches("uzi", &names) && matches("XO  lil", &names) && matches("drop tour", &names));
+        assert!(matches("CAFÉ", &names), "case doesn't matter, accents included");
+        assert!(!matches("uzi bruh", &names), "every word has to be there");
+        assert!(!matches("droplil", &names), "a word doesn't run across two names");
     }
 
     #[test]
